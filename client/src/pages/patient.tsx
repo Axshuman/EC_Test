@@ -28,16 +28,70 @@ export default function PatientDashboard() {
   const [emergencyType, setEmergencyType] = useState('');
   const [emergencyDescription, setEmergencyDescription] = useState('');
   const [selectedHospital, setSelectedHospital] = useState('');
+  const [optimisticRequests, setOptimisticRequests] = useState<any[]>([]);
+
+  // Mock hospital data for demonstration
+  const mockHospitals = [
+    {
+      id: 1,
+      name: "City General Hospital",
+      address: "123 Main St, Downtown",
+      phone: "(555) 123-4567",
+      totalBeds: 150,
+      availableBeds: 23,
+      icuBeds: 20,
+      availableIcuBeds: 3,
+      emergencyStatus: "available",
+      distance: "1.2 km"
+    },
+    {
+      id: 2,
+      name: "Metro Emergency Center",
+      address: "456 Oak Ave, Midtown",
+      phone: "(555) 987-6543",
+      totalBeds: 200,
+      availableBeds: 45,
+      icuBeds: 30,
+      availableIcuBeds: 8,
+      emergencyStatus: "available",
+      distance: "2.1 km"
+    },
+    {
+      id: 3,
+      name: "Regional Medical Center",
+      address: "789 Pine Rd, Uptown",
+      phone: "(555) 456-7890",
+      totalBeds: 300,
+      availableBeds: 12,
+      icuBeds: 40,
+      availableIcuBeds: 2,
+      emergencyStatus: "busy",
+      distance: "3.5 km"
+    },
+    {
+      id: 4,
+      name: "University Hospital",
+      address: "321 College Blvd, University District",
+      phone: "(555) 654-3210",
+      totalBeds: 180,
+      availableBeds: 0,
+      icuBeds: 25,
+      availableIcuBeds: 0,
+      emergencyStatus: "full",
+      distance: "4.8 km"
+    }
+  ];
 
   // Fetch data with proper typing
-  const { data: hospitals = [], isLoading: hospitalsLoading } = useQuery({
+  const { data: hospitals = mockHospitals, isLoading: hospitalsLoading } = useQuery({
     queryKey: ['/api/hospitals'],
+    initialData: mockHospitals,
   });
 
   const { data: emergencyRequests = [], refetch: refetchRequests } = useQuery({
     queryKey: ['/api/emergency-requests/patient', user?.id],
     enabled: !!user?.id,
-    refetchInterval: 5000, // Refresh every 5 seconds
+    refetchInterval: 3000, // Refresh every 3 seconds for faster updates
   });
 
   // Emergency request mutation
@@ -46,21 +100,44 @@ export default function PatientDashboard() {
       const response = await apiRequest('POST', '/api/emergency/request', data);
       return response.json();
     },
-    onSuccess: () => {
+    onSuccess: (newRequest) => {
+      // Show attention-grabbing success notification
       toast({
-        title: "Emergency Request Sent",
-        description: "Help is on the way! We've notified nearby ambulances.",
+        title: "🚨 EMERGENCY REQUEST SENT",
+        description: "Help is on the way! Ambulances have been notified of your emergency.",
+        duration: 8000,
+        className: "toast-success"
       });
+      
+      // Show additional alert for critical emergencies
+      if (emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury') {
+        setTimeout(() => {
+          toast({
+            title: "🚑 CRITICAL EMERGENCY DISPATCHED",
+            description: "Priority ambulance en route to your location!",
+            duration: 10000,
+            className: "toast-emergency"
+          });
+        }, 2000);
+      }
+      
       setIsEmergencyDialogOpen(false);
       setEmergencyType('');
       setEmergencyDescription('');
+      
+      // Immediately refetch to show the new request
       refetchRequests();
+      
+      // Invalidate cache to force refresh
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency-requests/patient', user?.id] });
     },
     onError: (error) => {
       toast({
-        title: "Error",
-        description: "Failed to send emergency request. Please try again.",
+        title: "❌ REQUEST FAILED",
+        description: "Unable to send emergency request. Please try again immediately!",
         variant: "destructive",
+        duration: 8000,
+        className: "toast-emergency"
       });
     },
   });
@@ -75,14 +152,33 @@ export default function PatientDashboard() {
       return;
     }
 
+    // Create optimistic request for immediate display
+    const optimisticRequest = {
+      id: Date.now(), // Temporary ID
+      patientId: user?.id,
+      latitude: location.latitude.toString(),
+      longitude: location.longitude.toString(),
+      address: "Current location",
+      patientCondition: emergencyType,
+      notes: emergencyDescription,
+      priority: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
+               emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium',
+      status: 'pending',
+      requestedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    // Add to optimistic requests immediately
+    setOptimisticRequests(prev => [optimisticRequest, ...prev]);
+
     emergencyMutation.mutate({
       latitude: location.latitude,
       longitude: location.longitude,
       address: "Current location", // In real app, would reverse geocode
       patientCondition: emergencyType,
       notes: emergencyDescription,
-      priority: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
-               emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium'
+      priority: optimisticRequest.priority
     });
   };
 
@@ -320,47 +416,59 @@ export default function PatientDashboard() {
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              {Array.isArray(emergencyRequests) && emergencyRequests.length === 0 ? (
-                <div className="p-6 text-center">
-                  <Shield className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-gray-500 mb-2">No emergency requests yet</p>
-                  <p className="text-sm text-gray-400">When you request help, it will appear here</p>
-                </div>
-              ) : (
-                <div className="divide-y max-h-96 overflow-y-auto">
-                  {Array.isArray(emergencyRequests) && emergencyRequests.slice(0, 5).map((request: any) => (
-                    <div key={request.id} className="p-4 hover:bg-gray-50 transition-colors">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-2">
-                            {getStatusIcon(request.status)}
-                            <Badge 
-                              variant="secondary" 
-                              className={`${getPriorityColor(request.priority)} text-white text-xs`}
-                            >
-                              {request.priority}
-                            </Badge>
-                            <Badge variant="outline" className="text-xs">
-                              {request.status}
-                            </Badge>
-                          </div>
-                          <p className="font-medium text-sm text-gray-900 mb-1">
-                            {request.patientCondition || 'Medical Emergency'}
-                          </p>
-                          <p className="text-xs text-gray-600 mb-1">{request.address}</p>
-                          {request.notes && (
-                            <p className="text-xs text-gray-500 mb-2">{request.notes}</p>
-                          )}
-                          <div className="flex items-center gap-2 text-xs text-gray-500">
-                            <Clock className="w-3 h-3" />
-                            {format(new Date(request.requestedAt), 'MMM d, h:mm a')}
+              {(() => {
+                // Combine optimistic requests with actual requests, removing duplicates
+                const allRequests = [...optimisticRequests, ...(Array.isArray(emergencyRequests) ? emergencyRequests : [])];
+                const uniqueRequests = allRequests.filter((request, index, arr) => 
+                  arr.findIndex(r => r.id === request.id) === index
+                );
+                
+                if (uniqueRequests.length === 0) {
+                  return (
+                    <div className="p-6 text-center">
+                      <Shield className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                      <p className="text-gray-500 mb-2">No emergency requests yet</p>
+                      <p className="text-sm text-gray-400">When you request help, it will appear here</p>
+                    </div>
+                  );
+                }
+                
+                return (
+                  <div className="divide-y max-h-96 overflow-y-auto">
+                    {uniqueRequests.slice(0, 5).map((request: any) => (
+                      <div key={request.id} className="p-4 hover:bg-gray-50 transition-colors">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="flex items-center gap-2 mb-2">
+                              {getStatusIcon(request.status)}
+                              <Badge 
+                                variant="secondary" 
+                                className={`${getPriorityColor(request.priority)} text-white text-xs`}
+                              >
+                                {request.priority}
+                              </Badge>
+                              <Badge variant="outline" className="text-xs">
+                                {request.status}
+                              </Badge>
+                            </div>
+                            <p className="font-medium text-sm text-gray-900 mb-1">
+                              {request.patientCondition || 'Medical Emergency'}
+                            </p>
+                            <p className="text-xs text-gray-600 mb-1">{request.address}</p>
+                            {request.notes && (
+                              <p className="text-xs text-gray-500 mb-2">{request.notes}</p>
+                            )}
+                            <div className="flex items-center gap-2 text-xs text-gray-500">
+                              <Clock className="w-3 h-3" />
+                              {format(new Date(request.requestedAt), 'MMM d, h:mm a')}
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                    ))}
+                  </div>
+                );
+              })()}
             </CardContent>
           </Card>
 
@@ -431,7 +539,7 @@ export default function PatientDashboard() {
                           </div>
                         </div>
                         <div className="text-right">
-                          <span className="text-xs text-gray-500">2.3 km</span>
+                          <span className="text-xs text-gray-500">{hospital.distance}</span>
                         </div>
                       </div>
                     </div>
