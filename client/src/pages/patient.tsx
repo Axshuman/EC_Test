@@ -30,57 +30,106 @@ export default function PatientDashboard() {
   const [selectedHospital, setSelectedHospital] = useState('');
   const [optimisticRequests, setOptimisticRequests] = useState<any[]>([]);
 
-  // Mock hospital data for demonstration
-  const mockHospitals = [
-    {
-      id: 1,
-      name: "City General Hospital",
-      address: "123 Main St, Downtown",
-      phone: "(555) 123-4567",
-      totalBeds: 150,
-      availableBeds: 23,
-      icuBeds: 20,
-      availableIcuBeds: 3,
-      emergencyStatus: "available",
-      distance: "1.2 km"
-    },
-    {
-      id: 2,
-      name: "Metro Emergency Center",
-      address: "456 Oak Ave, Midtown",
-      phone: "(555) 987-6543",
-      totalBeds: 200,
-      availableBeds: 45,
-      icuBeds: 30,
-      availableIcuBeds: 8,
-      emergencyStatus: "available",
-      distance: "2.1 km"
-    },
-    {
-      id: 3,
-      name: "Regional Medical Center",
-      address: "789 Pine Rd, Uptown",
-      phone: "(555) 456-7890",
-      totalBeds: 300,
-      availableBeds: 12,
-      icuBeds: 40,
-      availableIcuBeds: 2,
-      emergencyStatus: "busy",
-      distance: "3.5 km"
-    },
-    {
-      id: 4,
-      name: "University Hospital",
-      address: "321 College Blvd, University District",
-      phone: "(555) 654-3210",
-      totalBeds: 180,
-      availableBeds: 0,
-      icuBeds: 25,
-      availableIcuBeds: 0,
-      emergencyStatus: "full",
-      distance: "4.8 km"
+  // Generate location-based hospital data
+  const generateHospitals = () => {
+    if (!location) {
+      return [
+        {
+          id: 1,
+          name: "Emergency Hospital 1",
+          address: "Enable location to see nearby hospitals",
+          phone: "(555) 000-0000",
+          totalBeds: 150,
+          availableBeds: 23,
+          icuBeds: 20,
+          availableIcuBeds: 3,
+          emergencyStatus: "available",
+          distance: "-- km"
+        }
+      ];
     }
-  ];
+
+    // Create hospitals based on user's location with sequential naming
+    const baseHospitals = [
+      {
+        name: "Emergency Hospital 1",
+        address: `${Math.round(location.latitude * 100) / 100}° N Main St`,
+        offsetLat: 0.005,
+        offsetLng: 0.005,
+        distance: 0.8,
+        totalBeds: 180,
+        availableBeds: 25,
+        icuBeds: 25,
+        availableIcuBeds: 5,
+        emergencyStatus: "available"
+      },
+      {
+        name: "Emergency Hospital 2", 
+        address: `${Math.round(location.longitude * 100) / 100}° W Oak Ave`,
+        offsetLat: -0.008,
+        offsetLng: 0.012,
+        distance: 1.4,
+        totalBeds: 220,
+        availableBeds: 42,
+        icuBeds: 30,
+        availableIcuBeds: 8,
+        emergencyStatus: "available"
+      },
+      {
+        name: "Emergency Hospital 3",
+        address: `${Math.round((location.latitude + 0.01) * 100) / 100}° N Pine Rd`,
+        offsetLat: 0.015,
+        offsetLng: -0.008,
+        distance: 2.1,
+        totalBeds: 160,
+        availableBeds: 18,
+        icuBeds: 20,
+        availableIcuBeds: 2,
+        emergencyStatus: "busy"
+      },
+      {
+        name: "Emergency Hospital 4",
+        address: `${Math.round((location.longitude - 0.02) * 100) / 100}° W College Blvd`,
+        offsetLat: -0.020,
+        offsetLng: -0.015,
+        distance: 3.2,
+        totalBeds: 200,
+        availableBeds: 8,
+        icuBeds: 35,
+        availableIcuBeds: 1,
+        emergencyStatus: "busy"
+      },
+      {
+        name: "Emergency Hospital 5",
+        address: `${Math.round((location.latitude - 0.025) * 100) / 100}° S Elm St`,
+        offsetLat: -0.025,
+        offsetLng: 0.020,
+        distance: 4.1,
+        totalBeds: 150,
+        availableBeds: 0,
+        icuBeds: 18,
+        availableIcuBeds: 0,
+        emergencyStatus: "full"
+      }
+    ];
+
+    return baseHospitals
+      .sort((a, b) => a.distance - b.distance) // Sort by distance
+      .map((hospital, index) => ({
+        id: index + 1,
+        name: hospital.name,
+        address: hospital.address,
+        phone: `(555) ${String(123 + index).padStart(3, '0')}-${String(4567 + index * 111).slice(-4)}`,
+        totalBeds: hospital.totalBeds,
+        availableBeds: hospital.availableBeds,
+        icuBeds: hospital.icuBeds,
+        availableIcuBeds: hospital.availableIcuBeds,
+        emergencyStatus: hospital.emergencyStatus,
+        distance: `${hospital.distance.toFixed(1)} km`
+      }));
+  };
+
+  const mockHospitals = generateHospitals();
 
   // Fetch data with proper typing
   const { data: hospitals = mockHospitals, isLoading: hospitalsLoading } = useQuery({
@@ -101,35 +150,23 @@ export default function PatientDashboard() {
       return response.json();
     },
     onSuccess: (newRequest) => {
-      // Show attention-grabbing success notification
+      // Clear optimistic request and replace with actual request
+      setOptimisticRequests([]);
+      
+      // Show single success notification
       toast({
         title: "🚨 EMERGENCY REQUEST SENT",
-        description: "Help is on the way! Ambulances have been notified of your emergency.",
-        duration: 8000,
-        className: "toast-success"
+        description: `Help is on the way! ${emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'Priority ambulance dispatched!' : 'Ambulances have been notified.'}`,
+        duration: 6000,
+        className: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? "toast-emergency" : "toast-success"
       });
-      
-      // Show additional alert for critical emergencies
-      if (emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury') {
-        setTimeout(() => {
-          toast({
-            title: "🚑 CRITICAL EMERGENCY DISPATCHED",
-            description: "Priority ambulance en route to your location!",
-            duration: 10000,
-            className: "toast-emergency"
-          });
-        }, 2000);
-      }
       
       setIsEmergencyDialogOpen(false);
       setEmergencyType('');
       setEmergencyDescription('');
       
-      // Immediately refetch to show the new request
+      // Refetch to get the actual request with correct ID
       refetchRequests();
-      
-      // Invalidate cache to force refresh
-      queryClient.invalidateQueries({ queryKey: ['/api/emergency-requests/patient', user?.id] });
     },
     onError: (error) => {
       toast({
@@ -152,21 +189,22 @@ export default function PatientDashboard() {
       return;
     }
 
-    // Create optimistic request for immediate display
+    // Create optimistic request for immediate display  
     const optimisticRequest = {
-      id: Date.now(), // Temporary ID
+      id: `temp-${Date.now()}`, // Temporary ID with prefix
       patientId: user?.id,
       latitude: location.latitude.toString(),
       longitude: location.longitude.toString(),
-      address: "Current location",
+      address: "Current Location (GPS)",
       patientCondition: emergencyType,
       notes: emergencyDescription,
       priority: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
                emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium',
-      status: 'pending',
+      status: 'sending',
       requestedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      isOptimistic: true
     };
 
     // Add to optimistic requests immediately
@@ -203,10 +241,14 @@ export default function PatientDashboard() {
 
   const getStatusIcon = (status: string) => {
     switch (status) {
-      case 'pending': return <Clock className="w-4 h-4" />;
-      case 'dispatched': return <Ambulance className="w-4 h-4" />;
-      case 'en_route': return <Navigation className="w-4 h-4" />;
-      case 'completed': return <Shield className="w-4 h-4" />;
+      case 'sending': return <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />;
+      case 'pending': return <Clock className="w-4 h-4 text-yellow-600" />;
+      case 'dispatched': return <Ambulance className="w-4 h-4 text-blue-600" />;
+      case 'en_route': return <Navigation className="w-4 h-4 text-orange-600" />;
+      case 'at_scene': return <Heart className="w-4 h-4 text-red-600" />;
+      case 'transporting': return <Activity className="w-4 h-4 text-purple-600" />;
+      case 'completed': return <Shield className="w-4 h-4 text-green-600" />;
+      case 'cancelled': return <AlertCircle className="w-4 h-4 text-gray-600" />;
       default: return <Activity className="w-4 h-4" />;
     }
   };
@@ -417,11 +459,32 @@ export default function PatientDashboard() {
             </CardHeader>
             <CardContent className="p-0">
               {(() => {
-                // Combine optimistic requests with actual requests, removing duplicates
-                const allRequests = [...optimisticRequests, ...(Array.isArray(emergencyRequests) ? emergencyRequests : [])];
-                const uniqueRequests = allRequests.filter((request, index, arr) => 
-                  arr.findIndex(r => r.id === request.id) === index
-                );
+                // Combine optimistic and actual requests, filter out temp IDs when real data arrives
+                let allRequests = [...optimisticRequests];
+                
+                if (Array.isArray(emergencyRequests)) {
+                  // Add actual requests
+                  allRequests = [...allRequests, ...emergencyRequests];
+                  
+                  // Remove optimistic requests if we have real data
+                  allRequests = allRequests.filter(request => {
+                    if (request.isOptimistic && emergencyRequests.length > 0) {
+                      // Check if we have a similar real request (created within last 30 seconds)
+                      const recentRealRequest = emergencyRequests.find(realReq => 
+                        Math.abs(new Date(realReq.requestedAt).getTime() - new Date(request.requestedAt).getTime()) < 30000
+                      );
+                      return !recentRealRequest;
+                    }
+                    return true;
+                  });
+                }
+                
+                // Sort by request time (newest first) and remove exact duplicates
+                const uniqueRequests = allRequests
+                  .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime())
+                  .filter((request, index, arr) => 
+                    arr.findIndex(r => r.id === request.id) === index
+                  );
                 
                 if (uniqueRequests.length === 0) {
                   return (
@@ -436,7 +499,7 @@ export default function PatientDashboard() {
                 return (
                   <div className="divide-y max-h-96 overflow-y-auto">
                     {uniqueRequests.slice(0, 5).map((request: any) => (
-                      <div key={request.id} className="p-4 hover:bg-gray-50 transition-colors">
+                      <div key={request.id} className={`p-4 hover:bg-gray-50 transition-colors ${request.isOptimistic ? 'bg-blue-50 border-l-4 border-blue-400' : ''}`}>
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
                             <div className="flex items-center gap-2 mb-2">
@@ -445,11 +508,16 @@ export default function PatientDashboard() {
                                 variant="secondary" 
                                 className={`${getPriorityColor(request.priority)} text-white text-xs`}
                               >
-                                {request.priority}
+                                {request.priority.toUpperCase()}
                               </Badge>
-                              <Badge variant="outline" className="text-xs">
-                                {request.status}
+                              <Badge variant="outline" className="text-xs capitalize">
+                                {request.status === 'sending' ? 'Sending...' : request.status.replace('_', ' ')}
                               </Badge>
+                              {request.isOptimistic && (
+                                <Badge className="bg-blue-100 text-blue-800 text-xs">
+                                  Processing
+                                </Badge>
+                              )}
                             </div>
                             <p className="font-medium text-sm text-gray-900 mb-1">
                               {request.patientCondition || 'Medical Emergency'}
