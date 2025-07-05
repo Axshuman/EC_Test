@@ -29,6 +29,7 @@ export default function PatientDashboard() {
   const [emergencyDescription, setEmergencyDescription] = useState('');
   const [selectedHospital, setSelectedHospital] = useState('');
   const [optimisticRequests, setOptimisticRequests] = useState<any[]>([]);
+  const [notificationShown, setNotificationShown] = useState(false);
 
   // Generate location-based hospital data
   const generateHospitals = () => {
@@ -140,7 +141,7 @@ export default function PatientDashboard() {
   const { data: emergencyRequests = [], refetch: refetchRequests } = useQuery({
     queryKey: ['/api/emergency-requests/patient', user?.id],
     enabled: !!user?.id,
-    refetchInterval: 3000, // Refresh every 3 seconds for faster updates
+    refetchInterval: 10000, // Refresh every 10 seconds to reduce spam
   });
 
   // Emergency request mutation
@@ -150,22 +151,29 @@ export default function PatientDashboard() {
       return response.json();
     },
     onSuccess: (newRequest) => {
-      // Clear optimistic request and replace with actual request
-      setOptimisticRequests([]);
+      // Update optimistic request to real request (don't clear, just update)
+      setOptimisticRequests(prev => 
+        prev.map(req => 
+          req.isOptimistic ? { ...newRequest, isOptimistic: false } : req
+        )
+      );
       
-      // Show single success notification
-      toast({
-        title: "🚨 EMERGENCY REQUEST SENT",
-        description: `Help is on the way! ${emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'Priority ambulance dispatched!' : 'Ambulances have been notified.'}`,
-        duration: 6000,
-        className: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? "toast-emergency" : "toast-success"
-      });
+      // Show single success notification only once
+      if (!notificationShown) {
+        toast({
+          title: "🚨 EMERGENCY REQUEST SENT",
+          description: `Help is on the way! ${emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'Priority ambulance dispatched!' : 'Ambulances have been notified.'}`,
+          duration: 6000,
+          className: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? "toast-emergency" : "toast-success"
+        });
+        setNotificationShown(true);
+      }
       
       setIsEmergencyDialogOpen(false);
       setEmergencyType('');
       setEmergencyDescription('');
       
-      // Refetch to get the actual request with correct ID
+      // Refetch to get the latest data
       refetchRequests();
     },
     onError: (error) => {
@@ -209,6 +217,9 @@ export default function PatientDashboard() {
 
     // Add to optimistic requests immediately
     setOptimisticRequests(prev => [optimisticRequest, ...prev]);
+    
+    // Reset notification flag for new request
+    setNotificationShown(false);
 
     emergencyMutation.mutate({
       latitude: location.latitude,
@@ -444,6 +455,41 @@ export default function PatientDashboard() {
           </div>
         </div>
 
+        {/* Emergency Status Cards */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
+            <div className="w-8 h-8 bg-green-500 rounded-full mx-auto mb-2 flex items-center justify-center">
+              <Ambulance className="w-4 h-4 text-white" />
+            </div>
+            <h3 className="font-medium text-green-800 text-sm">Dispatched</h3>
+            <p className="text-green-600 text-xs mt-1">Help is on the way</p>
+          </div>
+          
+          <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 text-center">
+            <div className="w-8 h-8 bg-orange-500 rounded-full mx-auto mb-2 flex items-center justify-center">
+              <Clock className="w-4 h-4 text-white" />
+            </div>
+            <h3 className="font-medium text-orange-800 text-sm">Busy</h3>
+            <p className="text-orange-600 text-xs mt-1">Services occupied</p>
+          </div>
+          
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center">
+            <div className="w-8 h-8 bg-red-500 rounded-full mx-auto mb-2 flex items-center justify-center">
+              <AlertCircle className="w-4 h-4 text-white" />
+            </div>
+            <h3 className="font-medium text-red-800 text-sm">Declined</h3>
+            <p className="text-red-600 text-xs mt-1">Request rejected</p>
+          </div>
+          
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
+            <div className="w-8 h-8 bg-gray-500 rounded-full mx-auto mb-2 flex items-center justify-center">
+              <Activity className="w-4 h-4 text-white" />
+            </div>
+            <h3 className="font-medium text-gray-800 text-sm">No Services</h3>
+            <p className="text-gray-600 text-xs mt-1">None available</p>
+          </div>
+        </div>
+
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           {/* Emergency History */}
@@ -466,14 +512,16 @@ export default function PatientDashboard() {
                   // Add actual requests
                   allRequests = [...allRequests, ...emergencyRequests];
                   
-                  // Remove optimistic requests if we have real data
+                  // Only remove optimistic requests if we have matching real requests
                   allRequests = allRequests.filter(request => {
                     if (request.isOptimistic && emergencyRequests.length > 0) {
-                      // Check if we have a similar real request (created within last 30 seconds)
-                      const recentRealRequest = emergencyRequests.find(realReq => 
-                        Math.abs(new Date(realReq.requestedAt).getTime() - new Date(request.requestedAt).getTime()) < 30000
+                      // Check if we have exact matching real request
+                      const matchingRealRequest = emergencyRequests.find(realReq => 
+                        realReq.patientCondition === request.patientCondition &&
+                        realReq.priority === request.priority &&
+                        Math.abs(new Date(realReq.requestedAt).getTime() - new Date(request.requestedAt).getTime()) < 60000
                       );
-                      return !recentRealRequest;
+                      return !matchingRealRequest;
                     }
                     return true;
                   });
