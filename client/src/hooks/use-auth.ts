@@ -29,10 +29,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const response = await apiRequest('POST', '/api/auth/login', credentials);
       return response.json();
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setToken(data.token);
       localStorage.setItem('token', data.token);
-      queryClient.invalidateQueries({ queryKey: ['/api/auth/me'] });
+      
+      // Get user data and redirect to role-specific page
+      const userResponse = await apiRequest('GET', '/api/auth/me');
+      const userData = await userResponse.json();
+      
+      // Redirect to role-specific page
+      window.location.href = `/${userData.role}`;
     },
   });
 
@@ -41,10 +47,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const response = await apiRequest('POST', '/api/auth/register', userData);
       return response.json();
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setToken(data.token);
       localStorage.setItem('token', data.token);
-      queryClient.invalidateQueries({ queryKey: ['/api/auth/me'] });
+      
+      // Get user data and redirect to role-specific page
+      const userResponse = await apiRequest('GET', '/api/auth/me');
+      const userData = await userResponse.json();
+      
+      // Redirect to role-specific page
+      window.location.href = `/${userData.role}`;
     },
   });
 
