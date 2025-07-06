@@ -1,13 +1,18 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { WebSocketServer, WebSocket } from "ws";
+import { Server as SocketIOServer } from "socket.io";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { storage } from "./storage";
-import { loginSchema, registerSchema } from "@shared/schema";
+import { loginSchema, registerSchema, insertEmergencyRequestSchema, insertCommunicationSchema } from "@shared/schema";
 import { z } from "zod";
+// Google Maps integration - using fetch API instead of the googlemaps package
+// This avoids ES module compatibility issues
 
 const JWT_SECRET = process.env.JWT_SECRET || "emergency-connect-secret-key";
+
+// Google Maps API key for Places API requests
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_KEY || process.env.GOOGLE_MAPS_GENERATED_KEY;
 
 // Extend Express Request interface to include user
 declare global {
@@ -49,82 +54,206 @@ const requireRole = (roles: string[]) => {
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
-  // WebSocket server
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
-  const clients = new Map<string, WebSocket>();
+  // Socket.IO server with CORS configuration
+  const io = new SocketIOServer(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    },
+    transports: ['websocket', 'polling']
+  });
 
-  wss.on('connection', (ws: WebSocket, req) => {
-    const url = new URL(req.url!, `http://${req.headers.host}`);
-    const token = url.searchParams.get('token');
-    
+  // Store connected clients with their user info
+  const connectedClients = new Map<string, { socketId: string, userId: number, role: string }>();
+
+  // Socket.IO authentication middleware
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
     if (!token) {
-      ws.close(1008, 'Token required');
-      return;
+      return next(new Error('Authentication error'));
     }
 
     try {
       const user = jwt.verify(token, JWT_SECRET) as any;
-      const clientId = `${user.role}-${user.id}`;
-      clients.set(clientId, ws);
-
-      ws.on('message', async (message) => {
-        try {
-          const data = JSON.parse(message.toString());
-          
-          switch (data.type) {
-            case 'location_update':
-              if (user.role === 'ambulance') {
-                await storage.updateAmbulanceLocation(user.ambulanceId, data.lat, data.lng);
-                // Broadcast to hospitals and patients
-                broadcastToRole('hospital', {
-                  type: 'ambulance_location_update',
-                  ambulanceId: user.ambulanceId,
-                  lat: data.lat,
-                  lng: data.lng
-                });
-              }
-              break;
-            
-            case 'chat_message':
-              const communication = await storage.createCommunication({
-                emergencyRequestId: data.emergencyRequestId,
-                senderId: user.id,
-                receiverId: data.receiverId,
-                message: data.message,
-                messageType: 'text'
-              });
-              
-              // Send to specific user
-              const receiverClient = clients.get(`${data.receiverRole}-${data.receiverId}`);
-              if (receiverClient && receiverClient.readyState === WebSocket.OPEN) {
-                receiverClient.send(JSON.stringify({
-                  type: 'new_message',
-                  data: communication
-                }));
-              }
-              break;
-          }
-        } catch (error) {
-          console.error('WebSocket message error:', error);
-        }
-      });
-
-      ws.on('close', () => {
-        clients.delete(clientId);
-      });
-
+      socket.userId = user.id;
+      socket.userRole = user.role;
+      socket.ambulanceId = user.ambulanceId;
+      next();
     } catch (error) {
-      ws.close(1008, 'Invalid token');
+      next(new Error('Authentication error'));
     }
   });
 
-  const broadcastToRole = (role: string, data: any) => {
-    clients.forEach((client, clientId) => {
-      if (clientId.startsWith(role) && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(data));
+  io.on('connection', (socket: any) => {
+    const clientId = `${socket.userRole}-${socket.userId}`;
+    connectedClients.set(clientId, {
+      socketId: socket.id,
+      userId: socket.userId,
+      role: socket.userRole
+    });
+
+    console.log(`User connected: ${socket.userRole} (ID: ${socket.userId})`);
+
+    // Handle real-time location updates
+    socket.on('location_update', async (data: { lat: number, lng: number }) => {
+      if (socket.userRole === 'ambulance' && socket.ambulanceId) {
+        try {
+          await storage.updateAmbulanceLocation(socket.ambulanceId, data.lat, data.lng);
+          
+          // Broadcast location to all connected clients
+          socket.broadcast.emit('ambulance_location_update', {
+            ambulanceId: socket.ambulanceId,
+            lat: data.lat,
+            lng: data.lng,
+            timestamp: new Date()
+          });
+        } catch (error) {
+          console.error('Location update error:', error);
+        }
+      }
+    });
+
+    // Handle emergency request updates
+    socket.on('emergency_request_update', async (data: { requestId: number, status: string, ambulanceId?: number }) => {
+      try {
+        await storage.updateEmergencyRequest(data.requestId, {
+          status: data.status,
+          ambulanceId: data.ambulanceId
+        });
+
+        // Broadcast to all relevant parties
+        io.emit('emergency_status_update', {
+          requestId: data.requestId,
+          status: data.status,
+          ambulanceId: data.ambulanceId,
+          timestamp: new Date()
+        });
+      } catch (error) {
+        console.error('Emergency request update error:', error);
+      }
+    });
+
+    // Handle chat messages
+    socket.on('send_message', async (data: {
+      emergencyRequestId: number,
+      receiverId: number,
+      message: string,
+      receiverRole: string
+    }) => {
+      try {
+        const communication = await storage.createCommunication({
+          emergencyRequestId: data.emergencyRequestId,
+          senderId: socket.userId,
+          receiverId: data.receiverId,
+          message: data.message,
+          messageType: 'text'
+        });
+
+        // Send to specific receiver
+        const receiverClientId = `${data.receiverRole}-${data.receiverId}`;
+        const receiverClient = connectedClients.get(receiverClientId);
+        
+        if (receiverClient) {
+          io.to(receiverClient.socketId).emit('new_message', communication);
+        }
+
+        // Send confirmation back to sender
+        socket.emit('message_sent', communication);
+      } catch (error) {
+        console.error('Chat message error:', error);
+        socket.emit('message_error', { message: 'Failed to send message' });
+      }
+    });
+
+    // Handle disconnect
+    socket.on('disconnect', () => {
+      connectedClients.delete(clientId);
+      console.log(`User disconnected: ${socket.userRole} (ID: ${socket.userId})`);
+    });
+  });
+
+  // Helper function to broadcast to specific role
+  const broadcastToRole = (role: string, event: string, data: any) => {
+    connectedClients.forEach((client) => {
+      if (client.role === role) {
+        io.to(client.socketId).emit(event, data);
       }
     });
   };
+
+  // Helper function to calculate distance between two coordinates
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371; // Radius of the Earth in kilometers
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  };
+
+  // Google Maps API routes
+  app.get('/api/maps/hospitals', authenticateToken, async (req, res) => {
+    try {
+      const { lat, lng } = req.query;
+      
+      if (!lat || !lng) {
+        return res.status(400).json({ message: 'Latitude and longitude are required' });
+      }
+
+      const latitude = parseFloat(lat as string);
+      const longitude = parseFloat(lng as string);
+
+      // Use Google Places API to search for hospitals within 30km radius
+      const placesUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${latitude},${longitude}&radius=30000&type=hospital&key=${GOOGLE_MAPS_API_KEY}`;
+
+      try {
+        const response = await fetch(placesUrl);
+        const data = await response.json();
+
+        const places = data.results || [];
+        
+        // Process and sort hospitals by distance
+        const hospitals = places.map((place: any) => {
+          const distance = calculateDistance(
+            latitude,
+            longitude,
+            place.geometry.location.lat,
+            place.geometry.location.lng
+          );
+
+          return {
+            id: place.place_id,
+            name: place.name,
+            address: place.vicinity || place.formatted_address,
+            latitude: place.geometry.location.lat,
+            longitude: place.geometry.location.lng,
+            distance: Math.round(distance * 100) / 100, // Round to 2 decimal places
+            rating: place.rating || null,
+            openNow: place.opening_hours?.open_now || null,
+            // Mock data for hospital details since Google Places doesn't provide this
+            totalBeds: Math.floor(Math.random() * 300) + 50,
+            availableBeds: Math.floor(Math.random() * 50) + 10,
+            icuBeds: Math.floor(Math.random() * 20) + 5,
+            availableIcuBeds: Math.floor(Math.random() * 10) + 1,
+            emergencyServices: true,
+            status: 'available'
+          };
+        }).sort((a: any, b: any) => a.distance - b.distance); // Sort by distance
+
+        res.json(hospitals);
+      } catch (mapsError) {
+        console.error('Google Maps API error:', mapsError);
+        // Fallback to empty array if Maps API fails
+        res.json([]);
+      }
+    } catch (error) {
+      console.error('Hospital search error:', error);
+      res.status(500).json({ message: 'Failed to search hospitals' });
+    }
+  });
 
   // Auth routes
   app.post('/api/auth/register', async (req, res) => {

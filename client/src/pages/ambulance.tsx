@@ -23,7 +23,7 @@ import {
 
 export default function AmbulanceDashboard() {
   const { location } = useGeolocation();
-  const { sendMessage } = useWebSocket();
+  const { sendMessage, lastMessage } = useWebSocket();
   const [, setLocation] = useLocation();
   const [showRejectDialog, setShowRejectDialog] = useState<any>(null);
 

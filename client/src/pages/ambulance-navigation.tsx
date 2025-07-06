@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, MapPin, Timer, Navigation, Clock, Heart, AlertTriangle } from "lucide-react";
+import { ArrowLeft, MapPin, Timer, Navigation, Clock, Heart, AlertTriangle, Phone, MessageSquare, CheckCircle } from "lucide-react";
 import { useLocation } from "wouter";
 
 export default function AmbulanceNavigation() {
@@ -21,8 +21,8 @@ export default function AmbulanceNavigation() {
   // Mock GPS coordinates for demonstration
   const mockCurrentLocation = { lat: 40.7580, lng: -73.9855 };
   const mockDestination = emergencyRequest ? {
-    lat: parseFloat(emergencyRequest.latitude),
-    lng: parseFloat(emergencyRequest.longitude)
+    lat: parseFloat((emergencyRequest as any)?.latitude || '40.7128'),
+    lng: parseFloat((emergencyRequest as any)?.longitude || '-74.0060')
   } : { lat: 40.7128, lng: -74.0060 };
 
   useEffect(() => {

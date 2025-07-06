@@ -4,7 +4,6 @@ import { useGeolocation } from '@/hooks/use-geolocation';
 import { useWebSocket } from '@/hooks/use-websocket';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { apiRequest, queryClient } from '@/lib/queryClient';
-import { RoleHeader } from '@/components/role-header';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,13 +12,13 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { MapPin, Clock, Phone, Bed, AlertCircle, Activity, Heart, Ambulance, Hospital, Navigation, Zap, Shield } from 'lucide-react';
+import { MapPin, Clock, Phone, Bed, AlertCircle, Activity, Heart, Ambulance, Hospital, Navigation, Zap, Shield, CheckCircle } from 'lucide-react';
 import { format } from 'date-fns';
 
 export default function PatientDashboard() {
   const { user } = useAuth();
   const { location, error: locationError } = useGeolocation();
-  const { isConnected } = useWebSocket();
+  const { isConnected, socket, lastMessage } = useWebSocket();
   
   // State for emergency request dialog
   const [isEmergencyDialogOpen, setIsEmergencyDialogOpen] = useState(false);
@@ -28,118 +27,43 @@ export default function PatientDashboard() {
   const [selectedHospital, setSelectedHospital] = useState('');
   const [requestSubmitted, setRequestSubmitted] = useState(false);
 
-  // Generate location-based hospital data
-  const generateHospitals = () => {
-    if (!location) {
-      return [
-        {
-          id: 1,
-          name: "Emergency Hospital 1",
-          address: "Enable location to see nearby hospitals",
-          phone: "(555) 000-0000",
-          totalBeds: 150,
-          availableBeds: 23,
-          icuBeds: 20,
-          availableIcuBeds: 3,
-          emergencyStatus: "available",
-          distance: "-- km"
-        }
-      ];
-    }
-
-    // Create hospitals based on user's location with sequential naming
-    const baseHospitals = [
-      {
-        name: "Emergency Hospital 1",
-        address: `${Math.round(location.latitude * 100) / 100}° N Main St`,
-        offsetLat: 0.005,
-        offsetLng: 0.005,
-        distance: 0.8,
-        totalBeds: 180,
-        availableBeds: 25,
-        icuBeds: 25,
-        availableIcuBeds: 5,
-        emergencyStatus: "available"
-      },
-      {
-        name: "Emergency Hospital 2", 
-        address: `${Math.round(location.longitude * 100) / 100}° W Oak Ave`,
-        offsetLat: -0.008,
-        offsetLng: 0.012,
-        distance: 1.4,
-        totalBeds: 220,
-        availableBeds: 42,
-        icuBeds: 30,
-        availableIcuBeds: 8,
-        emergencyStatus: "available"
-      },
-      {
-        name: "Emergency Hospital 3",
-        address: `${Math.round((location.latitude + 0.01) * 100) / 100}° N Pine Rd`,
-        offsetLat: 0.015,
-        offsetLng: -0.008,
-        distance: 2.1,
-        totalBeds: 160,
-        availableBeds: 18,
-        icuBeds: 20,
-        availableIcuBeds: 2,
-        emergencyStatus: "busy"
-      },
-      {
-        name: "Emergency Hospital 4",
-        address: `${Math.round((location.longitude - 0.02) * 100) / 100}° W College Blvd`,
-        offsetLat: -0.020,
-        offsetLng: -0.015,
-        distance: 3.2,
-        totalBeds: 200,
-        availableBeds: 8,
-        icuBeds: 35,
-        availableIcuBeds: 1,
-        emergencyStatus: "busy"
-      },
-      {
-        name: "Emergency Hospital 5",
-        address: `${Math.round((location.latitude - 0.025) * 100) / 100}° S Elm St`,
-        offsetLat: -0.025,
-        offsetLng: 0.020,
-        distance: 4.1,
-        totalBeds: 150,
-        availableBeds: 0,
-        icuBeds: 18,
-        availableIcuBeds: 0,
-        emergencyStatus: "full"
-      }
-    ];
-
-    return baseHospitals
-      .sort((a, b) => a.distance - b.distance) // Sort by distance
-      .map((hospital, index) => ({
-        id: index + 1,
-        name: hospital.name,
-        address: hospital.address,
-        phone: `(555) ${String(123 + index).padStart(3, '0')}-${String(4567 + index * 111).slice(-4)}`,
-        totalBeds: hospital.totalBeds,
-        availableBeds: hospital.availableBeds,
-        icuBeds: hospital.icuBeds,
-        availableIcuBeds: hospital.availableIcuBeds,
-        emergencyStatus: hospital.emergencyStatus,
-        distance: `${hospital.distance.toFixed(1)} km`
-      }));
-  };
-
-  const mockHospitals = generateHospitals();
-
-  // Fetch data with proper typing
-  const { data: hospitals = mockHospitals, isLoading: hospitalsLoading } = useQuery({
-    queryKey: ['/api/hospitals'],
-    initialData: mockHospitals,
+  // Fetch real hospital data from Google Maps API
+  const { data: hospitals = [], isLoading: hospitalsLoading } = useQuery({
+    queryKey: ['/api/maps/hospitals', location?.latitude, location?.longitude],
+    enabled: !!location,
+    staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
   const { data: emergencyRequests = [], refetch: refetchRequests } = useQuery({
-    queryKey: ['/api/emergency-requests/patient', user?.id],
+    queryKey: ['/api/emergency/requests'],
     enabled: !!user?.id,
-    refetchInterval: 30000, // Refresh every 30 seconds to reduce unnecessary requests
+    refetchInterval: 5000, // Check every 5 seconds for real-time updates
   });
+
+  // Listen for real-time updates via Socket.IO
+  useEffect(() => {
+    if (socket && lastMessage) {
+      const { event, data } = lastMessage;
+      
+      switch (event) {
+        case 'emergency_status_update':
+          // Refetch emergency requests when status changes
+          refetchRequests();
+          break;
+        case 'ambulance_response':
+          // Handle ambulance accept/reject responses
+          if (data.status === 'accepted') {
+            // Show confirmation message
+            setRequestSubmitted(false); // Reset loading state
+          } else if (data.status === 'rejected') {
+            // Show no ambulances available message
+            setRequestSubmitted(false);
+          }
+          refetchRequests();
+          break;
+      }
+    }
+  }, [lastMessage, socket, refetchRequests]);
 
   // Emergency request mutation
   const emergencyMutation = useMutation({
@@ -154,406 +78,284 @@ export default function PatientDashboard() {
       setEmergencyDescription('');
       
       // Invalidate and refetch to get the latest data
-      queryClient.invalidateQueries({ queryKey: ['/api/emergency-requests/patient', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
     },
     onError: (error) => {
       console.error('Emergency request failed:', error);
-      // Handle error silently or show simple alert
       alert('Unable to send emergency request. Please try again.');
     },
   });
 
   const handleEmergencyRequest = () => {
     if (!location) {
-      alert("Please enable location access to request emergency services.");
+      alert('Location access is required for emergency requests.');
       return;
     }
 
-    if (!emergencyType) {
-      alert("Please select an emergency type.");
+    if (!emergencyType || !emergencyDescription) {
+      alert('Please fill in all required fields.');
       return;
     }
-
-    const priority = emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
-                    emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium';
 
     emergencyMutation.mutate({
       latitude: location.latitude,
       longitude: location.longitude,
-      address: "Current location", // In real app, would reverse geocode
+      address: `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`,
       patientCondition: emergencyType,
       notes: emergencyDescription,
-      priority: priority
     });
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'available': return 'bg-green-500';
-      case 'busy': return 'bg-yellow-500';
-      case 'full': return 'bg-red-500';
+      case 'pending': return 'bg-yellow-500';
+      case 'accepted': return 'bg-green-500';
+      case 'in_progress': return 'bg-blue-500';
+      case 'completed': return 'bg-gray-500';
+      case 'rejected': return 'bg-red-500';
       default: return 'bg-gray-500';
     }
   };
 
-  const getPriorityColor = (priority: string) => {
-    switch (priority) {
-      case 'critical': return 'bg-red-500';
-      case 'high': return 'bg-orange-500';
-      case 'medium': return 'bg-yellow-500';
-      case 'low': return 'bg-green-500';
-      default: return 'bg-gray-500';
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
+  const getStatusText = (status: string) => {
     switch (status) {
-      case 'sending': return <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />;
-      case 'pending': return <Clock className="w-4 h-4 text-yellow-600" />;
-      case 'dispatched': return <Ambulance className="w-4 h-4 text-blue-600" />;
-      case 'en_route': return <Navigation className="w-4 h-4 text-orange-600" />;
-      case 'at_scene': return <Heart className="w-4 h-4 text-red-600" />;
-      case 'transporting': return <Activity className="w-4 h-4 text-purple-600" />;
-      case 'completed': return <Shield className="w-4 h-4 text-green-600" />;
-      case 'cancelled': return <AlertCircle className="w-4 h-4 text-gray-600" />;
-      default: return <Activity className="w-4 h-4" />;
+      case 'pending': return 'Waiting for ambulance response...';
+      case 'accepted': return 'Ambulance dispatched';
+      case 'in_progress': return 'Ambulance en route';
+      case 'completed': return 'Emergency completed';
+      case 'rejected': return 'No ambulances available';
+      default: return status;
     }
   };
-
-  if (!user) {
-    return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600 mx-auto mb-4"></div>
-          <h2 className="text-2xl font-bold mb-4">Loading Dashboard...</h2>
-        </div>
-      </div>
-    );
-  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-50 to-orange-50">
-      <div className="container mx-auto px-4 py-6 lg:py-8 max-w-7xl">
-        {/* Header Section */}
-        <div className="mb-8">
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-            <div>
-              <h1 className="text-3xl lg:text-4xl font-bold text-gray-900 mb-2">
-                Emergency Dashboard
-              </h1>
-              <p className="text-gray-600 text-lg">
-                Immediate medical assistance at your fingertips
-              </p>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-                <span className="text-sm font-medium text-gray-700">
-                  {isConnected ? 'Connected' : 'Disconnected'}
-                </span>
-              </div>
-              {location && (
-                <div className="flex items-center gap-2 text-sm text-gray-600">
-                  <MapPin className="w-4 h-4" />
-                  <span>Location Active</span>
-                </div>
-              )}
-            </div>
-          </div>
+    <div className="container mx-auto p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Emergency Dashboard</h1>
+          <p className="text-gray-600">Welcome back, {user?.firstName || user?.username}</p>
         </div>
-
-        {/* Emergency Action Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-          {/* Emergency Button Card */}
-          <Card className="lg:col-span-2 border-red-200 shadow-lg">
-            <CardHeader className="bg-gradient-to-r from-red-500 to-red-600 text-white rounded-t-lg">
-              <CardTitle className="flex items-center gap-3 text-xl">
-                <Zap className="w-6 h-6" />
-                Emergency Services
-              </CardTitle>
-              <CardDescription className="text-red-100">
-                Get immediate medical assistance when you need it most
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-6">
-              {locationError ? (
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
-                  <div className="flex items-center gap-2">
-                    <AlertCircle className="w-5 h-5 text-yellow-600" />
-                    <p className="text-yellow-800 font-medium">Location Access Required</p>
-                  </div>
-                  <p className="text-yellow-700 text-sm mt-1">{locationError}</p>
-                </div>
-              ) : location ? (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
-                  <div className="flex items-center gap-2">
-                    <MapPin className="w-5 h-5 text-green-600" />
-                    <p className="text-green-800 font-medium">Location Detected</p>
-                  </div>
-                  <p className="text-green-700 text-sm mt-1">
-                    Coordinates: {location.latitude.toFixed(6)}, {location.longitude.toFixed(6)}
-                  </p>
-                </div>
-              ) : (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
-                  <div className="flex items-center gap-2">
-                    <Navigation className="w-5 h-5 text-blue-600" />
-                    <p className="text-blue-800 font-medium">Detecting Location...</p>
-                  </div>
-                </div>
-              )}
-              
-              <Dialog open={isEmergencyDialogOpen} onOpenChange={setIsEmergencyDialogOpen}>
-                <DialogTrigger asChild>
-                  <Button 
-                    size="lg" 
-                    className="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-4 text-lg"
-                    disabled={!location || !isConnected}
-                  >
-                    <Heart className="w-6 h-6 mr-2" />
-                    REQUEST EMERGENCY HELP
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-md">
-                  <DialogHeader>
-                    <DialogTitle className="flex items-center gap-2">
-                      <AlertCircle className="w-5 h-5 text-red-500" />
-                      Emergency Request Details
-                    </DialogTitle>
-                    <DialogDescription>
-                      Please provide details about your emergency to help responders prepare.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <div className="space-y-4">
-                    <div>
-                      <Label htmlFor="emergency-type">Emergency Type</Label>
-                      <Select value={emergencyType} onValueChange={setEmergencyType}>
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select emergency type" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="Heart Attack">Heart Attack</SelectItem>
-                          <SelectItem value="Severe Injury">Severe Injury</SelectItem>
-                          <SelectItem value="Chest Pain">Chest Pain</SelectItem>
-                          <SelectItem value="Difficulty Breathing">Difficulty Breathing</SelectItem>
-                          <SelectItem value="Stroke Symptoms">Stroke Symptoms</SelectItem>
-                          <SelectItem value="Severe Bleeding">Severe Bleeding</SelectItem>
-                          <SelectItem value="Allergic Reaction">Allergic Reaction</SelectItem>
-                          <SelectItem value="Other">Other Medical Emergency</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <Label htmlFor="description">Additional Details</Label>
-                      <Textarea
-                        id="description"
-                        placeholder="Describe symptoms, location details, or other important information..."
-                        value={emergencyDescription}
-                        onChange={(e) => setEmergencyDescription(e.target.value)}
-                        rows={3}
-                      />
-                    </div>
-                    <div className="flex gap-2 pt-4">
-                      <Button
-                        onClick={() => setIsEmergencyDialogOpen(false)}
-                        variant="outline"
-                        className="flex-1"
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        onClick={handleEmergencyRequest}
-                        className="flex-1 bg-red-600 hover:bg-red-700"
-                        disabled={!emergencyType || emergencyMutation.isPending}
-                      >
-                        {emergencyMutation.isPending ? 'Sending...' : 'Send Request'}
-                      </Button>
-                    </div>
-                  </div>
-                </DialogContent>
-              </Dialog>
-            </CardContent>
-          </Card>
-
-          {/* Quick Stats */}
-          <div className="space-y-4">
-            <Card className="border-green-200">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className="bg-green-100 p-2 rounded-lg">
-                    <Hospital className="w-6 h-6 text-green-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-600">Available Hospitals</p>
-                    <p className="text-2xl font-bold text-green-600">
-                      {Array.isArray(hospitals) ? hospitals.filter((h: any) => h.emergencyStatus === 'available').length : 0}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            
-            <Card className="border-blue-200">
-              <CardContent className="p-4">
-                <div className="flex items-center gap-3">
-                  <div className="bg-blue-100 p-2 rounded-lg">
-                    <Ambulance className="w-6 h-6 text-blue-600" />
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-600">Active Requests</p>
-                    <p className="text-2xl font-bold text-blue-600">
-                      {Array.isArray(emergencyRequests) ? emergencyRequests.filter((r: any) => !['completed', 'cancelled'].includes(r.status)).length : 0}
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </div>
-
-
-
-        {/* Main Content Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Emergency History */}
-          <Card className="shadow-lg">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Activity className="w-5 h-5" />
-                Recent Emergency Requests
-              </CardTitle>
-              <CardDescription>
-                Track your emergency service requests and their status
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              {requestSubmitted && (!emergencyRequests || (Array.isArray(emergencyRequests) && emergencyRequests.length === 0)) ? (
-                <div className="p-6 text-center">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600 mx-auto mb-4"></div>
-                  <p className="text-gray-600">Processing your emergency request...</p>
-                </div>
-              ) : (!emergencyRequests || (Array.isArray(emergencyRequests) && emergencyRequests.length === 0)) ? (
-                <div className="p-6 text-center">
-                  <Shield className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-gray-500 mb-2">No emergency requests yet</p>
-                  <p className="text-sm text-gray-400">When you request help, it will appear here</p>
-                </div>
-              ) : (
-                <div className="divide-y max-h-96 overflow-y-auto">
-                  {Array.isArray(emergencyRequests) && emergencyRequests.slice(0, 5).map((request: any) => (
-                    <div key={request.id} className="p-4 hover:bg-gray-50 transition-colors">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-2">
-                            {getStatusIcon(request.status)}
-                            <Badge 
-                              variant="secondary" 
-                              className={`${getPriorityColor(request.priority)} text-white text-xs`}
-                            >
-                              {request.priority.toUpperCase()}
-                            </Badge>
-                            <Badge variant="outline" className="text-xs capitalize">
-                              {request.status.replace('_', ' ')}
-                            </Badge>
-                          </div>
-                          <p className="font-medium text-sm text-gray-900 mb-1">
-                            {request.patientCondition || 'Medical Emergency'}
-                          </p>
-                          <p className="text-xs text-gray-600 mb-1">{request.address}</p>
-                          {request.notes && (
-                            <p className="text-xs text-gray-500 mb-2">{request.notes}</p>
-                          )}
-                          <div className="flex items-center gap-2 text-xs text-gray-500">
-                            <Clock className="w-3 h-3" />
-                            {format(new Date(request.requestedAt), 'MMM d, h:mm a')}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Nearby Hospitals */}
-          <Card className="shadow-lg">
-            <CardHeader>
-              <CardTitle className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Hospital className="w-5 h-5" />
-                  Nearby Hospitals
-                </div>
-                <Button variant="outline" size="sm">
-                  <MapPin className="w-4 h-4 mr-2" />
-                  View Map
-                </Button>
-              </CardTitle>
-              <CardDescription>
-                Real-time hospital availability and capacity information
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              {hospitalsLoading ? (
-                <div className="divide-y">
-                  {[1, 2, 3].map((i) => (
-                    <div key={i} className="p-4 animate-pulse">
-                      <div className="h-4 bg-gray-200 rounded w-3/4 mb-2" />
-                      <div className="h-3 bg-gray-200 rounded w-1/2 mb-3" />
-                      <div className="flex gap-2">
-                        <div className="h-6 bg-gray-200 rounded w-20" />
-                        <div className="h-6 bg-gray-200 rounded w-16" />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="divide-y max-h-96 overflow-y-auto">
-                  {Array.isArray(hospitals) && hospitals.map((hospital: any) => (
-                    <div key={hospital.id} className="p-4 hover:bg-gray-50 transition-colors">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-2">
-                            <h3 className="font-semibold text-sm text-gray-900">{hospital.name}</h3>
-                            <Badge 
-                              variant="secondary" 
-                              className={`${getStatusColor(hospital.emergencyStatus)} text-white text-xs`}
-                            >
-                              {hospital.emergencyStatus}
-                            </Badge>
-                          </div>
-                          <p className="text-xs text-gray-600 mb-2">{hospital.address}</p>
-                          <div className="flex items-center gap-2 text-xs text-gray-500 mb-2">
-                            <Phone className="w-3 h-3" />
-                            {hospital.phone}
-                          </div>
-                          <div className="grid grid-cols-2 gap-4 text-xs">
-                            <div className="flex items-center gap-1">
-                              <Bed className="w-3 h-3 text-gray-500" />
-                              <span className="text-gray-700">
-                                {hospital.availableBeds}/{hospital.totalBeds} beds
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Heart className="w-3 h-3 text-red-500" />
-                              <span className="text-gray-700">
-                                {hospital.availableIcuBeds}/{hospital.icuBeds} ICU
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs text-gray-500">{hospital.distance}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+        <div className="flex items-center space-x-2">
+          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
+          <span className="text-sm text-gray-600">
+            {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
         </div>
       </div>
+
+      {/* Emergency Button */}
+      <Card className="border-red-200 bg-red-50">
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2 text-red-700">
+            <AlertCircle className="w-6 h-6" />
+            <span>Emergency Services</span>
+          </CardTitle>
+          <CardDescription>
+            Request immediate medical assistance
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Dialog open={isEmergencyDialogOpen} onOpenChange={setIsEmergencyDialogOpen}>
+            <DialogTrigger asChild>
+              <Button 
+                size="lg" 
+                className="w-full bg-red-600 hover:bg-red-700 text-white"
+                disabled={!location || emergencyMutation.isPending}
+              >
+                <AlertCircle className="w-5 h-5 mr-2" />
+                Request Emergency Assistance
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Emergency Request</DialogTitle>
+                <DialogDescription>
+                  Please provide details about your emergency
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div>
+                  <Label htmlFor="emergency-type">Emergency Type</Label>
+                  <Select value={emergencyType} onValueChange={setEmergencyType}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select emergency type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="cardiac">Cardiac Emergency</SelectItem>
+                      <SelectItem value="respiratory">Breathing Difficulty</SelectItem>
+                      <SelectItem value="trauma">Injury/Trauma</SelectItem>
+                      <SelectItem value="stroke">Stroke Symptoms</SelectItem>
+                      <SelectItem value="other">Other Medical Emergency</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor="description">Description</Label>
+                  <Textarea
+                    id="description"
+                    placeholder="Describe the emergency situation..."
+                    value={emergencyDescription}
+                    onChange={(e) => setEmergencyDescription(e.target.value)}
+                    className="h-24"
+                  />
+                </div>
+                <div className="flex justify-end space-x-2">
+                  <Button 
+                    variant="outline" 
+                    onClick={() => setIsEmergencyDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button 
+                    onClick={handleEmergencyRequest}
+                    disabled={emergencyMutation.isPending}
+                    className="bg-red-600 hover:bg-red-700"
+                  >
+                    {emergencyMutation.isPending ? 'Sending...' : 'Send Request'}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+          
+          {locationError && (
+            <p className="text-sm text-red-600 mt-2">
+              Location access required for emergency services
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Current Emergency Requests */}
+      {emergencyRequests.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2">
+              <Activity className="w-5 h-5" />
+              <span>Current Emergency Requests</span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {emergencyRequests.map((request: any) => (
+              <div key={request.id} className="border rounded-lg p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Badge className={getStatusColor(request.status)}>
+                      {getStatusText(request.status)}
+                    </Badge>
+                    <span className="text-sm text-gray-500">
+                      {format(new Date(request.createdAt), 'MMM dd, yyyy HH:mm')}
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-1 text-sm text-gray-600">
+                    <MapPin className="w-4 h-4" />
+                    <span>{request.address}</span>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="font-medium">Condition:</span> {request.patientCondition}
+                  </div>
+                  <div>
+                    <span className="font-medium">Priority:</span> {request.priority}
+                  </div>
+                </div>
+                
+                {request.notes && (
+                  <div className="text-sm">
+                    <span className="font-medium">Notes:</span> {request.notes}
+                  </div>
+                )}
+
+                {request.status === 'accepted' && (
+                  <div className="bg-green-50 border border-green-200 rounded p-3">
+                    <div className="flex items-center space-x-2 text-green-700">
+                      <CheckCircle className="w-5 h-5" />
+                      <span className="font-medium">Ambulance Dispatched</span>
+                    </div>
+                    <p className="text-sm text-green-600 mt-1">
+                      Emergency services are on their way to your location.
+                    </p>
+                  </div>
+                )}
+
+                {request.status === 'rejected' && (
+                  <div className="bg-red-50 border border-red-200 rounded p-3">
+                    <div className="flex items-center space-x-2 text-red-700">
+                      <AlertCircle className="w-5 h-5" />
+                      <span className="font-medium">No Ambulances Available</span>
+                    </div>
+                    <p className="text-sm text-red-600 mt-1">
+                      All ambulances are currently busy. Please try again or contact emergency services directly.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Nearby Hospitals */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <Hospital className="w-5 h-5" />
+            <span>Nearby Hospitals</span>
+          </CardTitle>
+          <CardDescription>
+            Real-time hospital information within 30km radius
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {hospitalsLoading ? (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+              <p className="text-gray-600 mt-2">Loading nearby hospitals...</p>
+            </div>
+          ) : hospitals.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              {location ? 'No hospitals found in your area' : 'Enable location to see nearby hospitals'}
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              {hospitals.slice(0, 5).map((hospital: any) => (
+                <div key={hospital.id} className="border rounded-lg p-4">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <h3 className="font-semibold text-gray-900">{hospital.name}</h3>
+                      <p className="text-sm text-gray-600 flex items-center mt-1">
+                        <MapPin className="w-4 h-4 mr-1" />
+                        {hospital.address}
+                      </p>
+                      <div className="flex items-center space-x-4 mt-2 text-sm">
+                        <div className="flex items-center">
+                          <Bed className="w-4 h-4 mr-1" />
+                          <span>{hospital.availableBeds}/{hospital.totalBeds} beds</span>
+                        </div>
+                        <div className="flex items-center">
+                          <Heart className="w-4 h-4 mr-1" />
+                          <span>{hospital.availableIcuBeds}/{hospital.icuBeds} ICU</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <Badge variant={hospital.status === 'available' ? 'default' : 'secondary'}>
+                        {hospital.status}
+                      </Badge>
+                      <p className="text-sm text-gray-600 mt-1">
+                        {hospital.distance} km
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
