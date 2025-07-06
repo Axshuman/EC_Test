@@ -1,9 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/hooks/use-auth';
 import { useGeolocation } from '@/hooks/use-geolocation';
 import { useWebSocket } from '@/hooks/use-websocket';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { useToast } from '@/hooks/use-toast';
 import { apiRequest, queryClient } from '@/lib/queryClient';
 import { RoleHeader } from '@/components/role-header';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,15 +20,13 @@ export default function PatientDashboard() {
   const { user } = useAuth();
   const { location, error: locationError } = useGeolocation();
   const { isConnected } = useWebSocket();
-  const { toast } = useToast();
   
   // State for emergency request dialog
   const [isEmergencyDialogOpen, setIsEmergencyDialogOpen] = useState(false);
   const [emergencyType, setEmergencyType] = useState('');
   const [emergencyDescription, setEmergencyDescription] = useState('');
   const [selectedHospital, setSelectedHospital] = useState('');
-  const [optimisticRequests, setOptimisticRequests] = useState<any[]>([]);
-  const [notificationShown, setNotificationShown] = useState(false);
+  const [requestSubmitted, setRequestSubmitted] = useState(false);
 
   // Generate location-based hospital data
   const generateHospitals = () => {
@@ -141,7 +138,7 @@ export default function PatientDashboard() {
   const { data: emergencyRequests = [], refetch: refetchRequests } = useQuery({
     queryKey: ['/api/emergency-requests/patient', user?.id],
     enabled: !!user?.id,
-    refetchInterval: 10000, // Refresh every 10 seconds to reduce spam
+    refetchInterval: 30000, // Refresh every 30 seconds to reduce unnecessary requests
   });
 
   // Emergency request mutation
@@ -151,75 +148,34 @@ export default function PatientDashboard() {
       return response.json();
     },
     onSuccess: (newRequest) => {
-      // Update optimistic request to real request (don't clear, just update)
-      setOptimisticRequests(prev => 
-        prev.map(req => 
-          req.isOptimistic ? { ...newRequest, isOptimistic: false } : req
-        )
-      );
-      
-      // Show single success notification only once
-      if (!notificationShown) {
-        toast({
-          title: "🚨 EMERGENCY REQUEST SENT",
-          description: `Help is on the way! ${emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'Priority ambulance dispatched!' : 'Ambulances have been notified.'}`,
-          duration: 6000,
-          className: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? "toast-emergency" : "toast-success"
-        });
-        setNotificationShown(true);
-      }
-      
+      setRequestSubmitted(true);
       setIsEmergencyDialogOpen(false);
       setEmergencyType('');
       setEmergencyDescription('');
       
-      // Refetch to get the latest data
-      refetchRequests();
+      // Invalidate and refetch to get the latest data
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency-requests/patient', user?.id] });
     },
     onError: (error) => {
-      toast({
-        title: "❌ REQUEST FAILED",
-        description: "Unable to send emergency request. Please try again immediately!",
-        variant: "destructive",
-        duration: 8000,
-        className: "toast-emergency"
-      });
+      console.error('Emergency request failed:', error);
+      // Handle error silently or show simple alert
+      alert('Unable to send emergency request. Please try again.');
     },
   });
 
   const handleEmergencyRequest = () => {
     if (!location) {
-      toast({
-        title: "Location Required",
-        description: "Please enable location access to request emergency services.",
-        variant: "destructive",
-      });
+      alert("Please enable location access to request emergency services.");
       return;
     }
 
-    // Create optimistic request for immediate display  
-    const optimisticRequest = {
-      id: `temp-${Date.now()}`, // Temporary ID with prefix
-      patientId: user?.id,
-      latitude: location.latitude.toString(),
-      longitude: location.longitude.toString(),
-      address: "Current Location (GPS)",
-      patientCondition: emergencyType,
-      notes: emergencyDescription,
-      priority: emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
-               emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium',
-      status: 'sending',
-      requestedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      isOptimistic: true
-    };
+    if (!emergencyType) {
+      alert("Please select an emergency type.");
+      return;
+    }
 
-    // Add to optimistic requests immediately
-    setOptimisticRequests(prev => [optimisticRequest, ...prev]);
-    
-    // Reset notification flag for new request
-    setNotificationShown(false);
+    const priority = emergencyType === 'Heart Attack' || emergencyType === 'Severe Injury' ? 'critical' : 
+                    emergencyType === 'Chest Pain' || emergencyType === 'Difficulty Breathing' ? 'high' : 'medium';
 
     emergencyMutation.mutate({
       latitude: location.latitude,
@@ -227,7 +183,7 @@ export default function PatientDashboard() {
       address: "Current location", // In real app, would reverse geocode
       patientCondition: emergencyType,
       notes: emergencyDescription,
-      priority: optimisticRequest.priority
+      priority: priority
     });
   };
 
@@ -455,40 +411,7 @@ export default function PatientDashboard() {
           </div>
         </div>
 
-        {/* Emergency Status Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-            <div className="w-8 h-8 bg-green-500 rounded-full mx-auto mb-2 flex items-center justify-center">
-              <Ambulance className="w-4 h-4 text-white" />
-            </div>
-            <h3 className="font-medium text-green-800 text-sm">Dispatched</h3>
-            <p className="text-green-600 text-xs mt-1">Help is on the way</p>
-          </div>
-          
-          <div className="bg-orange-50 border border-orange-200 rounded-lg p-4 text-center">
-            <div className="w-8 h-8 bg-orange-500 rounded-full mx-auto mb-2 flex items-center justify-center">
-              <Clock className="w-4 h-4 text-white" />
-            </div>
-            <h3 className="font-medium text-orange-800 text-sm">Busy</h3>
-            <p className="text-orange-600 text-xs mt-1">Services occupied</p>
-          </div>
-          
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center">
-            <div className="w-8 h-8 bg-red-500 rounded-full mx-auto mb-2 flex items-center justify-center">
-              <AlertCircle className="w-4 h-4 text-white" />
-            </div>
-            <h3 className="font-medium text-red-800 text-sm">Declined</h3>
-            <p className="text-red-600 text-xs mt-1">Request rejected</p>
-          </div>
-          
-          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-center">
-            <div className="w-8 h-8 bg-gray-500 rounded-full mx-auto mb-2 flex items-center justify-center">
-              <Activity className="w-4 h-4 text-white" />
-            </div>
-            <h3 className="font-medium text-gray-800 text-sm">No Services</h3>
-            <p className="text-gray-600 text-xs mt-1">None available</p>
-          </div>
-        </div>
+
 
         {/* Main Content Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
@@ -504,87 +427,52 @@ export default function PatientDashboard() {
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              {(() => {
-                // Combine optimistic and actual requests, filter out temp IDs when real data arrives
-                let allRequests = [...optimisticRequests];
-                
-                if (Array.isArray(emergencyRequests)) {
-                  // Add actual requests
-                  allRequests = [...allRequests, ...emergencyRequests];
-                  
-                  // Only remove optimistic requests if we have matching real requests
-                  allRequests = allRequests.filter(request => {
-                    if (request.isOptimistic && emergencyRequests.length > 0) {
-                      // Check if we have exact matching real request
-                      const matchingRealRequest = emergencyRequests.find(realReq => 
-                        realReq.patientCondition === request.patientCondition &&
-                        realReq.priority === request.priority &&
-                        Math.abs(new Date(realReq.requestedAt).getTime() - new Date(request.requestedAt).getTime()) < 60000
-                      );
-                      return !matchingRealRequest;
-                    }
-                    return true;
-                  });
-                }
-                
-                // Sort by request time (newest first) and remove exact duplicates
-                const uniqueRequests = allRequests
-                  .sort((a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime())
-                  .filter((request, index, arr) => 
-                    arr.findIndex(r => r.id === request.id) === index
-                  );
-                
-                if (uniqueRequests.length === 0) {
-                  return (
-                    <div className="p-6 text-center">
-                      <Shield className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                      <p className="text-gray-500 mb-2">No emergency requests yet</p>
-                      <p className="text-sm text-gray-400">When you request help, it will appear here</p>
-                    </div>
-                  );
-                }
-                
-                return (
-                  <div className="divide-y max-h-96 overflow-y-auto">
-                    {uniqueRequests.slice(0, 5).map((request: any) => (
-                      <div key={request.id} className={`p-4 hover:bg-gray-50 transition-colors ${request.isOptimistic ? 'bg-blue-50 border-l-4 border-blue-400' : ''}`}>
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              {getStatusIcon(request.status)}
-                              <Badge 
-                                variant="secondary" 
-                                className={`${getPriorityColor(request.priority)} text-white text-xs`}
-                              >
-                                {request.priority.toUpperCase()}
-                              </Badge>
-                              <Badge variant="outline" className="text-xs capitalize">
-                                {request.status === 'sending' ? 'Sending...' : request.status.replace('_', ' ')}
-                              </Badge>
-                              {request.isOptimistic && (
-                                <Badge className="bg-blue-100 text-blue-800 text-xs">
-                                  Processing
-                                </Badge>
-                              )}
-                            </div>
-                            <p className="font-medium text-sm text-gray-900 mb-1">
-                              {request.patientCondition || 'Medical Emergency'}
-                            </p>
-                            <p className="text-xs text-gray-600 mb-1">{request.address}</p>
-                            {request.notes && (
-                              <p className="text-xs text-gray-500 mb-2">{request.notes}</p>
-                            )}
-                            <div className="flex items-center gap-2 text-xs text-gray-500">
-                              <Clock className="w-3 h-3" />
-                              {format(new Date(request.requestedAt), 'MMM d, h:mm a')}
-                            </div>
+              {requestSubmitted && (!emergencyRequests || (Array.isArray(emergencyRequests) && emergencyRequests.length === 0)) ? (
+                <div className="p-6 text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-600 mx-auto mb-4"></div>
+                  <p className="text-gray-600">Processing your emergency request...</p>
+                </div>
+              ) : (!emergencyRequests || (Array.isArray(emergencyRequests) && emergencyRequests.length === 0)) ? (
+                <div className="p-6 text-center">
+                  <Shield className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+                  <p className="text-gray-500 mb-2">No emergency requests yet</p>
+                  <p className="text-sm text-gray-400">When you request help, it will appear here</p>
+                </div>
+              ) : (
+                <div className="divide-y max-h-96 overflow-y-auto">
+                  {Array.isArray(emergencyRequests) && emergencyRequests.slice(0, 5).map((request: any) => (
+                    <div key={request.id} className="p-4 hover:bg-gray-50 transition-colors">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-2">
+                            {getStatusIcon(request.status)}
+                            <Badge 
+                              variant="secondary" 
+                              className={`${getPriorityColor(request.priority)} text-white text-xs`}
+                            >
+                              {request.priority.toUpperCase()}
+                            </Badge>
+                            <Badge variant="outline" className="text-xs capitalize">
+                              {request.status.replace('_', ' ')}
+                            </Badge>
+                          </div>
+                          <p className="font-medium text-sm text-gray-900 mb-1">
+                            {request.patientCondition || 'Medical Emergency'}
+                          </p>
+                          <p className="text-xs text-gray-600 mb-1">{request.address}</p>
+                          {request.notes && (
+                            <p className="text-xs text-gray-500 mb-2">{request.notes}</p>
+                          )}
+                          <div className="flex items-center gap-2 text-xs text-gray-500">
+                            <Clock className="w-3 h-3" />
+                            {format(new Date(request.requestedAt), 'MMM d, h:mm a')}
                           </div>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                );
-              })()}
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 

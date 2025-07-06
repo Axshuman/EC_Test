@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import Login from "@/pages/login";
 import PatientDashboard from "@/pages/patient";
 import AmbulanceDashboard from "@/pages/ambulance";
+import AmbulanceNavigation from "@/pages/ambulance-navigation";
 import HospitalDashboard from "@/pages/hospital";
 import NotFound from "@/pages/not-found";
 import { WebSocketProvider } from "@/hooks/use-websocket";
@@ -32,6 +33,7 @@ function Router() {
       <div className="min-h-screen bg-neutral-50">
         <RoleHeader user={user} />
         <Switch>
+          <Route path="/ambulance/navigate/:requestId" component={AmbulanceNavigation} />
           <Route path="/" component={() => {
             switch (user.role) {
               case 'patient':
