@@ -2,23 +2,26 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '@/hooks/use-auth';
 import { useGeolocation } from '@/hooks/use-geolocation';
 import { useWebSocket } from '@/hooks/use-websocket';
-import { useQuery, useMutation } from '@tanstack/react-query';
-import { apiRequest, queryClient } from '@/lib/queryClient';
+import { NotificationSystem } from '@/components/notification-system';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { LocationMap } from '@/components/LocationMap';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { MapPin, Clock, Phone, Bed, AlertCircle, Activity, Heart, Ambulance, Hospital, Navigation, Zap, Shield, CheckCircle } from 'lucide-react';
+import { MapPin, Clock, Phone, Bed, AlertCircle, Activity, Heart, Ambulance, Hospital, Navigation, Zap, Shield, CheckCircle, X } from 'lucide-react';
 import { format } from 'date-fns';
 
 export default function PatientDashboard() {
   const { user } = useAuth();
   const { location, error: locationError } = useGeolocation();
   const { isConnected, socket, lastMessage } = useWebSocket();
+  const queryClient = useQueryClient();
   
   // State for emergency request dialog
   const [isEmergencyDialogOpen, setIsEmergencyDialogOpen] = useState(false);
@@ -26,44 +29,78 @@ export default function PatientDashboard() {
   const [emergencyDescription, setEmergencyDescription] = useState('');
   const [selectedHospital, setSelectedHospital] = useState('');
   const [requestSubmitted, setRequestSubmitted] = useState(false);
+  const [ambulanceETA, setAmbulanceETA] = useState<{[key: number]: number}>({});
 
-  // Fetch real hospital data from Google Maps API
-  const { data: hospitals = [], isLoading: hospitalsLoading } = useQuery({
-    queryKey: ['/api/maps/hospitals', location?.latitude, location?.longitude],
+  // Get nearby hospitals from our database with real-time bed updates
+  const hospitalsQuery = useQuery({
+    queryKey: ['/api/hospitals/nearby', location?.latitude, location?.longitude],
     enabled: !!location,
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
 
-  const { data: emergencyRequests = [], refetch: refetchRequests } = useQuery({
+  // Listen for hospital bed updates via WebSocket
+  useEffect(() => {
+    if (lastMessage) {
+      try {
+        const data = typeof lastMessage === 'string' ? JSON.parse(lastMessage) : lastMessage;
+        if (data.type === 'hospital_bed_update') {
+          console.log('🏥 Received hospital bed update:', data.data);
+          // Invalidate hospital queries to refresh bed data
+          queryClient.invalidateQueries({ queryKey: ['/api/hospitals/nearby'] });
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error);
+      }
+    }
+  }, [lastMessage, queryClient]);
+
+  const emergencyRequestsQuery = useQuery({
     queryKey: ['/api/emergency/requests'],
     enabled: !!user?.id,
     refetchInterval: 5000, // Check every 5 seconds for real-time updates
   });
 
+  const hospitals = hospitalsQuery.data || [];
+  const emergencyRequests = emergencyRequestsQuery.data || [];
+  const hospitalsLoading = hospitalsQuery.isLoading;
+
   // Listen for real-time updates via Socket.IO
   useEffect(() => {
-    if (socket && lastMessage) {
-      const { event, data } = lastMessage;
-      
-      switch (event) {
-        case 'emergency_status_update':
-          // Refetch emergency requests when status changes
-          refetchRequests();
-          break;
-        case 'ambulance_response':
-          // Handle ambulance accept/reject responses
-          if (data.status === 'accepted') {
-            // Show confirmation message
-            setRequestSubmitted(false); // Reset loading state
-          } else if (data.status === 'rejected') {
-            // Show no ambulances available message
-            setRequestSubmitted(false);
-          }
-          refetchRequests();
-          break;
-      }
+    if (!socket || !lastMessage) return;
+    
+    const { type, data } = lastMessage;
+    console.log('⚡ Patient received WebSocket event:', type, data);
+    
+    switch (type) {
+      case 'emergency_status_update':
+        emergencyRequestsQuery.refetch();
+        break;
+      case 'ambulance_response':
+        if (data.status === 'accepted') {
+          setRequestSubmitted(false);
+        } else if (data.status === 'rejected') {
+          setRequestSubmitted(false);
+        }
+        emergencyRequestsQuery.refetch();
+        break;
+      case 'eta_update':
+        console.log('🎯 ETA update received on patient side:', data);
+        console.log('🎯 Current requests in state:', emergencyRequests.map(r => ({ id: r.id, status: r.status })));
+        if (data && data.requestId && typeof data.eta === 'number') {
+          console.log('🎯 Processing ETA for request:', data.requestId, 'ETA:', data.eta);
+          
+          // Apply ETA to the exact request ID received (no forcing)
+          setAmbulanceETA(prev => {
+            const updated = { ...prev, [data.requestId]: data.eta };
+            console.log('🎯 Updated ETA state:', updated);
+            return updated;
+          });
+        } else {
+          console.error('Invalid ETA data structure:', data);
+        }
+        break;
     }
-  }, [lastMessage, socket, refetchRequests]);
+  }, [lastMessage, socket]);
 
   // Emergency request mutation
   const emergencyMutation = useMutation({
@@ -76,94 +113,139 @@ export default function PatientDashboard() {
       setIsEmergencyDialogOpen(false);
       setEmergencyType('');
       setEmergencyDescription('');
-      
-      // Invalidate and refetch to get the latest data
+      setSelectedHospital('');
       queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
     },
     onError: (error) => {
-      console.error('Emergency request failed:', error);
-      alert('Unable to send emergency request. Please try again.');
+      console.error('Error submitting emergency request:', error);
+      setRequestSubmitted(false);
     },
   });
 
-  const handleEmergencyRequest = () => {
-    if (!location) {
-      alert('Location access is required for emergency requests.');
+  // Delete emergency request mutation
+  const deleteMutation = useMutation({
+    mutationFn: async (requestId: number) => {
+      const response = await apiRequest('DELETE', `/api/emergency/request/${requestId}`);
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+    },
+    onError: (error) => {
+      console.error('Error deleting emergency request:', error);
+    },
+  });
+
+  // Cancel emergency request mutation
+  const cancelMutation = useMutation({
+    mutationFn: async (requestId: number) => {
+      const response = await apiRequest('PUT', `/api/emergency/request/${requestId}`, {
+        status: 'cancelled'
+      });
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+    },
+    onError: (error) => {
+      console.error('Error cancelling emergency request:', error);
+    },
+  });
+
+  const handleEmergencySubmit = async () => {
+    if (!emergencyType || !emergencyDescription || !location) {
       return;
     }
 
-    if (!emergencyType || !emergencyDescription) {
-      alert('Please fill in all required fields.');
-      return;
-    }
-
-    emergencyMutation.mutate({
+    await emergencyMutation.mutateAsync({
+      type: emergencyType,
+      description: emergencyDescription,
+      priority: 'high',
       latitude: location.latitude,
       longitude: location.longitude,
-      address: `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`,
-      patientCondition: emergencyType,
-      notes: emergencyDescription,
+      hospitalId: selectedHospital ? parseInt(selectedHospital) : null,
     });
+  };
+
+  const handleDeleteRequest = (requestId: number) => {
+    deleteMutation.mutate(requestId);
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'pending': return 'bg-yellow-500';
-      case 'accepted': return 'bg-green-500';
-      case 'in_progress': return 'bg-blue-500';
-      case 'completed': return 'bg-gray-500';
-      case 'rejected': return 'bg-red-500';
-      default: return 'bg-gray-500';
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'dispatched':
+        return 'bg-green-100 text-green-800 border-green-200';
+      case 'accepted':
+        return 'bg-blue-100 text-blue-800 border-blue-200';
+      case 'in_progress':
+        return 'bg-purple-100 text-purple-800 border-purple-200';
+      case 'completed':
+        return 'bg-green-100 text-green-800 border-green-200';
+      case 'cancelled':
+        return 'bg-red-100 text-red-800 border-red-200';
+      default:
+        return 'bg-gray-100 text-gray-800 border-gray-200';
     }
   };
 
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case 'pending': return 'Waiting for ambulance response...';
-      case 'accepted': return 'Ambulance dispatched';
-      case 'in_progress': return 'Ambulance en route';
-      case 'completed': return 'Emergency completed';
-      case 'rejected': return 'No ambulances available';
-      default: return status;
+  const getPriorityColor = (priority: string) => {
+    switch (priority) {
+      case 'low':
+        return 'bg-green-100 text-green-800 border-green-200';
+      case 'medium':
+        return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'high':
+        return 'bg-orange-100 text-orange-800 border-orange-200';
+      case 'critical':
+        return 'bg-red-100 text-red-800 border-red-200';
+      default:
+        return 'bg-gray-100 text-gray-800 border-gray-200';
     }
   };
+
+  if (!user) {
+    return <div>Loading...</div>;
+  }
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
+    <div className="container mx-auto px-4 py-8 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Emergency Dashboard</h1>
-          <p className="text-gray-600">Welcome back, {user?.firstName || user?.username}</p>
+          <h1 className="text-3xl font-bold text-gray-900">Patient Dashboard</h1>
+          <p className="text-gray-600">Emergency medical services at your fingertips</p>
         </div>
-        <div className="flex items-center space-x-2">
-          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`}></div>
-          <span className="text-sm text-gray-600">
-            {isConnected ? 'Connected' : 'Disconnected'}
-          </span>
+        <div className="flex items-center space-x-4">
+          <div className={`flex items-center space-x-2 px-3 py-1 rounded-full text-sm ${
+            isConnected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            <div className={`w-2 h-2 rounded-full ${
+              isConnected ? 'bg-green-500' : 'bg-red-500'
+            }`} />
+            <span>{isConnected ? 'Connected' : 'Disconnected'}</span>
+          </div>
+          <NotificationSystem userRole="patient" userId={user.id} />
         </div>
       </div>
 
-      {/* Emergency Button */}
-      <Card className="border-red-200 bg-red-50">
+      {/* Emergency Request Form */}
+      <Card>
         <CardHeader>
-          <CardTitle className="flex items-center space-x-2 text-red-700">
-            <AlertCircle className="w-6 h-6" />
-            <span>Emergency Services</span>
+          <CardTitle className="flex items-center space-x-2">
+            <AlertCircle className="h-6 w-6 text-red-500" />
+            <span>Request Emergency Assistance</span>
           </CardTitle>
           <CardDescription>
-            Request immediate medical assistance
+            Submit an emergency request to get immediate medical assistance
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Dialog open={isEmergencyDialogOpen} onOpenChange={setIsEmergencyDialogOpen}>
             <DialogTrigger asChild>
-              <Button 
-                size="lg" 
-                className="w-full bg-red-600 hover:bg-red-700 text-white"
-                disabled={!location || emergencyMutation.isPending}
-              >
-                <AlertCircle className="w-5 h-5 mr-2" />
+              <Button className="w-full bg-red-600 hover:bg-red-700 text-white" size="lg">
+                <Zap className="h-5 w-5 mr-2" />
                 Request Emergency Assistance
               </Button>
             </DialogTrigger>
@@ -171,7 +253,7 @@ export default function PatientDashboard() {
               <DialogHeader>
                 <DialogTitle>Emergency Request</DialogTitle>
                 <DialogDescription>
-                  Please provide details about your emergency
+                  Please provide details about your emergency. Help is on the way.
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -183,174 +265,243 @@ export default function PatientDashboard() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="cardiac">Cardiac Emergency</SelectItem>
-                      <SelectItem value="respiratory">Breathing Difficulty</SelectItem>
-                      <SelectItem value="trauma">Injury/Trauma</SelectItem>
-                      <SelectItem value="stroke">Stroke Symptoms</SelectItem>
+                      <SelectItem value="accident">Accident/Trauma</SelectItem>
+                      <SelectItem value="respiratory">Breathing Problems</SelectItem>
+                      <SelectItem value="stroke">Stroke</SelectItem>
+                      <SelectItem value="diabetic">Diabetic Emergency</SelectItem>
+                      <SelectItem value="allergic">Allergic Reaction</SelectItem>
                       <SelectItem value="other">Other Medical Emergency</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+                
                 <div>
                   <Label htmlFor="description">Description</Label>
                   <Textarea
-                    id="description"
-                    placeholder="Describe the emergency situation..."
                     value={emergencyDescription}
                     onChange={(e) => setEmergencyDescription(e.target.value)}
-                    className="h-24"
+                    placeholder="Briefly describe the emergency situation..."
+                    rows={3}
                   />
                 </div>
-                <div className="flex justify-end space-x-2">
-                  <Button 
-                    variant="outline" 
-                    onClick={() => setIsEmergencyDialogOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button 
-                    onClick={handleEmergencyRequest}
-                    disabled={emergencyMutation.isPending}
-                    className="bg-red-600 hover:bg-red-700"
-                  >
-                    {emergencyMutation.isPending ? 'Sending...' : 'Send Request'}
-                  </Button>
+
+                <div>
+                  <Label htmlFor="hospital">Preferred Hospital (Optional)</Label>
+                  <Select value={selectedHospital} onValueChange={setSelectedHospital}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Auto-select nearest hospital" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {hospitals.map((hospital: any) => (
+                        <SelectItem key={hospital.id} value={hospital.id.toString()}>
+                          {hospital.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
+
+                <Button 
+                  onClick={handleEmergencySubmit}
+                  disabled={!emergencyType || !emergencyDescription || emergencyMutation.isPending}
+                  className="w-full bg-red-600 hover:bg-red-700"
+                >
+                  {emergencyMutation.isPending ? 'Submitting...' : 'Submit Emergency Request'}
+                </Button>
               </div>
             </DialogContent>
           </Dialog>
-          
-          {locationError && (
-            <p className="text-sm text-red-600 mt-2">
-              Location access required for emergency services
-            </p>
+        </CardContent>
+      </Card>
+
+
+
+      {/* Emergency Requests History */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <Activity className="h-5 w-5" />
+            <span>Your Emergency Requests</span>
+          </CardTitle>
+          <CardDescription>
+            Track the status of your emergency requests
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {emergencyRequests.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <Heart className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+              <p>No emergency requests found</p>
+              <p className="text-sm">Your emergency requests will appear here</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {emergencyRequests.map((request: any) => (
+                <Card key={request.id} className="border-l-4 border-l-blue-500">
+                  <CardContent className="pt-6">
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-2 mb-2">
+                          <Badge className={getStatusColor(request.status)}>
+                            {request.status.replace('_', ' ').toUpperCase()}
+                          </Badge>
+                          <Badge className={getPriorityColor(request.priority)}>
+                            {request.priority.toUpperCase()}
+                          </Badge>
+                          {ambulanceETA[request.id] && (
+                            <Badge className="bg-blue-100 text-blue-800 border-blue-200">
+                              <Clock className="h-3 w-3 mr-1" />
+                              ETA: {ambulanceETA[request.id]} min
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-sm text-gray-600 mb-2">{request.description}</p>
+                        {request.type && (
+                          <p className="text-xs text-gray-500 mb-2">
+                            <span className="font-medium">Type:</span> {request.type.replace('_', ' ')}
+                          </p>
+                        )}
+                        <div className="flex items-center space-x-4 text-sm text-gray-500">
+                          <span className="flex items-center">
+                            <Clock className="h-4 w-4 mr-1" />
+                            {format(new Date(request.createdAt), 'MMM dd, yyyy HH:mm')}
+                          </span>
+                          {request.ambulanceId && (
+                            <span className="flex items-center">
+                              <Ambulance className="h-4 w-4 mr-1" />
+                              Ambulance #{request.ambulanceId}
+                            </span>
+                          )}
+                          {request.hospitalId && (
+                            <span className="flex items-center">
+                              <Hospital className="h-4 w-4 mr-1" />
+                              Hospital #{request.hospitalId}
+                            </span>
+                          )}
+                        </div>
+                        {/* Show ambulance operator contact when ambulance is assigned */}
+                        {request.ambulance?.operatorPhone && (request.status === 'accepted' || request.status === 'dispatched' || request.status === 'en_route') && (
+                          <div className="mt-2 p-2 bg-blue-50 rounded border border-blue-200">
+                            <div className="flex items-center space-x-2 text-sm text-blue-700">
+                              <Phone className="h-4 w-4" />
+                              <span className="font-medium">Ambulance Contact:</span>
+                              <span>{request.ambulance.operatorPhone}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex space-x-2 ml-4">
+                        {/* Allow cancellation for pending, dispatched, and en_route statuses */}
+                        {(['pending', 'dispatched', 'en_route'].includes(request.status)) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => cancelMutation.mutate(request.id)}
+                            disabled={cancelMutation.isPending}
+                            className="text-orange-600 hover:text-orange-700"
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                        {/* Allow deletion for completed or cancelled requests */}
+                        {(['completed', 'cancelled'].includes(request.status)) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleDeleteRequest(request.id)}
+                            disabled={deleteMutation.isPending}
+                            className="text-red-600 hover:text-red-700"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Current Emergency Requests */}
-      {emergencyRequests.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <Activity className="w-5 h-5" />
-              <span>Current Emergency Requests</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {emergencyRequests.map((request: any) => (
-              <div key={request.id} className="border rounded-lg p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <Badge className={getStatusColor(request.status)}>
-                      {getStatusText(request.status)}
-                    </Badge>
-                    <span className="text-sm text-gray-500">
-                      {format(new Date(request.createdAt), 'MMM dd, yyyy HH:mm')}
-                    </span>
-                  </div>
-                  <div className="flex items-center space-x-1 text-sm text-gray-600">
-                    <MapPin className="w-4 h-4" />
-                    <span>{request.address}</span>
-                  </div>
-                </div>
-                
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <span className="font-medium">Condition:</span> {request.patientCondition}
-                  </div>
-                  <div>
-                    <span className="font-medium">Priority:</span> {request.priority}
-                  </div>
-                </div>
-                
-                {request.notes && (
-                  <div className="text-sm">
-                    <span className="font-medium">Notes:</span> {request.notes}
-                  </div>
-                )}
-
-                {request.status === 'accepted' && (
-                  <div className="bg-green-50 border border-green-200 rounded p-3">
-                    <div className="flex items-center space-x-2 text-green-700">
-                      <CheckCircle className="w-5 h-5" />
-                      <span className="font-medium">Ambulance Dispatched</span>
-                    </div>
-                    <p className="text-sm text-green-600 mt-1">
-                      Emergency services are on their way to your location.
-                    </p>
-                  </div>
-                )}
-
-                {request.status === 'rejected' && (
-                  <div className="bg-red-50 border border-red-200 rounded p-3">
-                    <div className="flex items-center space-x-2 text-red-700">
-                      <AlertCircle className="w-5 h-5" />
-                      <span className="font-medium">No Ambulances Available</span>
-                    </div>
-                    <p className="text-sm text-red-600 mt-1">
-                      All ambulances are currently busy. Please try again or contact emergency services directly.
-                    </p>
-                  </div>
-                )}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+      {/* Current Location & Ambulances Map */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <MapPin className="h-5 w-5" />
+            <span>Emergency Services Near You</span>
+          </CardTitle>
+          <CardDescription>
+            Your location and nearby ambulances
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <LocationMap 
+            title="Your Location & Nearby Ambulances"
+            height="400px"
+            showRefreshButton={true}
+            showCurrentAmbulance={false}
+            showAllAmbulances={true}
+          />
+        </CardContent>
+      </Card>
 
       {/* Nearby Hospitals */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center space-x-2">
-            <Hospital className="w-5 h-5" />
+            <Hospital className="h-5 w-5" />
             <span>Nearby Hospitals</span>
           </CardTitle>
           <CardDescription>
-            Real-time hospital information within 30km radius
+            Medical facilities in your area
           </CardDescription>
         </CardHeader>
         <CardContent>
           {hospitalsLoading ? (
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-              <p className="text-gray-600 mt-2">Loading nearby hospitals...</p>
-            </div>
+            <div className="text-center py-4">Loading nearby hospitals...</div>
           ) : hospitals.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
-              {location ? 'No hospitals found in your area' : 'Enable location to see nearby hospitals'}
+              <Hospital className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+              <p>No hospitals found in your area</p>
+              <p className="text-sm">Please enable location services</p>
             </div>
           ) : (
-            <div className="grid gap-4">
-              {hospitals.slice(0, 5).map((hospital: any) => (
-                <div key={hospital.id} className="border rounded-lg p-4">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-gray-900">{hospital.name}</h3>
-                      <p className="text-sm text-gray-600 flex items-center mt-1">
-                        <MapPin className="w-4 h-4 mr-1" />
-                        {hospital.address}
-                      </p>
-                      <div className="flex items-center space-x-4 mt-2 text-sm">
-                        <div className="flex items-center">
-                          <Bed className="w-4 h-4 mr-1" />
-                          <span>{hospital.availableBeds}/{hospital.totalBeds} beds</span>
-                        </div>
-                        <div className="flex items-center">
-                          <Heart className="w-4 h-4 mr-1" />
-                          <span>{hospital.availableIcuBeds}/{hospital.icuBeds} ICU</span>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <Badge variant={hospital.status === 'available' ? 'default' : 'secondary'}>
-                        {hospital.status}
+            <div className="grid gap-4 md:grid-cols-2">
+              {hospitals.map((hospital: any) => (
+                <Card key={hospital.id} className="border">
+                  <CardContent className="pt-4">
+                    <div className="flex justify-between items-start mb-2">
+                      <h3 className="font-semibold">{hospital.name}</h3>
+                      <Badge className={
+                        hospital.status === 'available' ? 'bg-green-100 text-green-800' :
+                        hospital.status === 'busy' ? 'bg-yellow-100 text-yellow-800' :
+                        hospital.status === 'full' ? 'bg-red-100 text-red-800' :
+                        'bg-blue-100 text-blue-800'
+                      }>
+                        {hospital.status ? hospital.status.toUpperCase() : 'ACTIVE'}
                       </Badge>
-                      <p className="text-sm text-gray-600 mt-1">
-                        {hospital.distance} km
-                      </p>
                     </div>
-                  </div>
-                </div>
+                    <p className="text-sm text-gray-600 mb-3">{hospital.address}</p>
+                    <div className="flex items-center justify-between text-sm">
+                      <div className="flex items-center space-x-4">
+                        <span className="flex items-center">
+                          <Bed className="h-4 w-4 mr-1" />
+                          {hospital.availableBeds || 0}/{hospital.totalBeds || 0} beds
+                        </span>
+                        <span className="flex items-center">
+                          <Shield className="h-4 w-4 mr-1" />
+                          {hospital.availableIcuBeds || 0}/{hospital.icuBeds || 0} ICU
+                        </span>
+                      </div>
+                      <span className="flex items-center">
+                        <Phone className="h-4 w-4 mr-1" />
+                        {hospital.phone || 'N/A'}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
               ))}
             </div>
           )}

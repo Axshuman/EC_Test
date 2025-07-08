@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { seedDatabase } from "./seed";
+import { seedExpandedBeds } from "./expanded-bed-seed";
 
 const app = express();
 app.use(express.json());
@@ -44,6 +45,15 @@ app.use((req, res, next) => {
   } catch (error) {
     // If seeding fails (e.g., data already exists), just log and continue
     console.log("Database seeding skipped (likely already seeded)");
+  }
+
+  // Initialize hospitals independently (only seed if needed)
+  try {
+    console.log("🏥 Starting independent hospital initialization...");
+    const { initializeAllHospitals } = await import('./hospital-independent-seeder');
+    await initializeAllHospitals();
+  } catch (error) {
+    console.error("Independent hospital initialization failed:", error);
   }
 
   const server = await registerRoutes(app);
