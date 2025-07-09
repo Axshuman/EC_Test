@@ -218,6 +218,11 @@ export class DatabaseStorage implements IStorage {
     return ambulance;
   }
 
+  async getAmbulanceByOperatorId(operatorId: number): Promise<Ambulance | undefined> {
+    const [ambulance] = await db.select().from(ambulances).where(eq(ambulances.operatorId, operatorId));
+    return ambulance;
+  }
+
   async getAmbulancesByHospital(hospitalId: number): Promise<Ambulance[]> {
     return db.select().from(ambulances).where(eq(ambulances.hospitalId, hospitalId)).orderBy(ambulances.id);
   }
@@ -408,9 +413,82 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getEmergencyRequestsByAmbulance(ambulanceId: number): Promise<EmergencyRequest[]> {
-    return db.select().from(emergencyRequests)
-      .where(eq(emergencyRequests.ambulanceId, ambulanceId))
-      .orderBy(desc(emergencyRequests.createdAt));
+    return db.select({
+      ...emergencyRequests,
+      patient: {
+        id: users.id,
+        username: users.username,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        phoneNumber: users.phone
+      },
+      ambulance: {
+        id: ambulances.id,
+        vehicleNumber: ambulances.vehicleNumber,
+        operatorId: ambulances.operatorId,
+        hospitalId: ambulances.hospitalId,
+        currentLatitude: ambulances.currentLatitude,
+        currentLongitude: ambulances.currentLongitude,
+        status: ambulances.status,
+        operatorPhone: ambulances.operatorPhone,
+        licenseNumber: ambulances.licenseNumber,
+        certification: ambulances.certification,
+        equipmentLevel: ambulances.equipmentLevel,
+        hospitalAffiliation: ambulances.hospitalAffiliation,
+        isActive: ambulances.isActive
+      }
+    })
+    .from(emergencyRequests)
+    .leftJoin(users, eq(emergencyRequests.patientId, users.id))
+    .leftJoin(ambulances, eq(emergencyRequests.ambulanceId, ambulances.id))
+    .where(
+      and(
+        eq(emergencyRequests.ambulanceId, ambulanceId),
+        sql`${emergencyRequests.status} NOT IN ('completed', 'cancelled', 'deleted')`
+      )
+    )
+    .orderBy(desc(emergencyRequests.createdAt));
+  }
+
+  async getActiveRequestForAmbulance(ambulanceId: number): Promise<EmergencyRequest | null> {
+    const [activeRequest] = await db.select({
+      ...emergencyRequests,
+      patient: {
+        id: users.id,
+        username: users.username,
+        firstName: users.firstName,
+        lastName: users.lastName,
+        phoneNumber: users.phone
+      },
+      ambulance: {
+        id: ambulances.id,
+        vehicleNumber: ambulances.vehicleNumber,
+        operatorId: ambulances.operatorId,
+        hospitalId: ambulances.hospitalId,
+        currentLatitude: ambulances.currentLatitude,
+        currentLongitude: ambulances.currentLongitude,
+        status: ambulances.status,
+        operatorPhone: ambulances.operatorPhone,
+        licenseNumber: ambulances.licenseNumber,
+        certification: ambulances.certification,
+        equipmentLevel: ambulances.equipmentLevel,
+        hospitalAffiliation: ambulances.hospitalAffiliation,
+        isActive: ambulances.isActive
+      }
+    })
+    .from(emergencyRequests)
+    .leftJoin(users, eq(emergencyRequests.patientId, users.id))
+    .leftJoin(ambulances, eq(emergencyRequests.ambulanceId, ambulances.id))
+    .where(
+      and(
+        eq(emergencyRequests.ambulanceId, ambulanceId),
+        sql`${emergencyRequests.status} IN ('accepted', 'dispatched', 'en_route', 'at_scene', 'transporting')`
+      )
+    )
+    .orderBy(desc(emergencyRequests.createdAt))
+    .limit(1);
+    
+    return activeRequest || null;
   }
 
   async getEmergencyRequestsByHospital(hospitalId: number): Promise<EmergencyRequest[]> {

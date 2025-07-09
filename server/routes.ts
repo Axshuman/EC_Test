@@ -753,7 +753,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           requests = enhancedRequests;
           break;
         case 'ambulance':
-          requests = await storage.getActiveEmergencyRequests();
+          // Get ambulance ID from user profile
+          const ambulanceProfile = await storage.getAmbulanceByOperatorId(req.user.id);
+          if (!ambulanceProfile) {
+            return res.status(404).json({ message: 'Ambulance profile not found' });
+          }
+          
+          // Get active request assigned to this ambulance (persistent tracking)
+          const activeRequest = await storage.getActiveRequestForAmbulance(ambulanceProfile.id);
+          
+          if (activeRequest) {
+            // Return the active request along with pending requests
+            const allActiveRequests = await storage.getActiveEmergencyRequests();
+            const pendingRequests = allActiveRequests.filter(req => req.status === 'pending');
+            
+            // Combine active request with pending requests, ensuring no duplicates
+            const combinedRequests = [activeRequest, ...pendingRequests.filter(req => req.id !== activeRequest.id)];
+            requests = combinedRequests;
+          } else {
+            // No active request, just return pending requests
+            requests = await storage.getActiveEmergencyRequests();
+          }
           break;
         case 'hospital':
           requests = await storage.getActiveEmergencyRequests();
