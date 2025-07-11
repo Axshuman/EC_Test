@@ -167,7 +167,16 @@ export function LocationMap({
         if (response.ok) {
           const locations = await response.json();
           const currentAmb = locations.find((amb: any) => amb.id === currentAmbulanceId);
-          setCurrentAmbulanceLocation(currentAmb);
+          if (currentAmb) {
+            // Ensure coordinates are parsed as numbers
+            const ambulanceWithParsedCoords = {
+              ...currentAmb,
+              latitude: parseFloat(currentAmb.currentLatitude),
+              longitude: parseFloat(currentAmb.currentLongitude)
+            };
+            console.log('🚑 Found current ambulance:', ambulanceWithParsedCoords);
+            setCurrentAmbulanceLocation(ambulanceWithParsedCoords);
+          }
         }
       }
     } catch (error) {
