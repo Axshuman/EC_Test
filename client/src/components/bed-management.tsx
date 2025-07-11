@@ -39,8 +39,17 @@ export function BedManagement() {
   const toggleBedStatus = (bedType: 'icu' | 'general', bedIndex: number) => {
     const key = bedType === 'icu' ? 'icuBeds' : 'generalBeds';
     const currentBeds = bedData[key];
-    const newOccupied = bedIndex < currentBeds.occupied ? 
-      currentBeds.occupied - 1 : currentBeds.occupied + 1;
+    
+    // Toggle logic: if clicking on an occupied bed (red), make it available
+    // If clicking on an available bed (green), make it occupied
+    let newOccupied;
+    if (bedIndex < currentBeds.occupied) {
+      // Clicking on occupied bed - make it and all beds after it available
+      newOccupied = bedIndex;
+    } else {
+      // Clicking on available bed - make it and all beds before it occupied
+      newOccupied = bedIndex + 1;
+    }
     
     const newBedData = {
       ...bedData,

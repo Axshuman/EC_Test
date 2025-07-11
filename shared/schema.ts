@@ -20,6 +20,7 @@ export const users = pgTable("users", {
 
 export const hospitals = pgTable("hospitals", {
   id: serial("id").primaryKey(),
+  userId: integer("user_id").references(() => users.id),
   name: varchar("name", { length: 255 }).notNull(),
   address: text("address").notNull(),
   phone: varchar("phone", { length: 20 }),
@@ -30,6 +31,7 @@ export const hospitals = pgTable("hospitals", {
   icuBeds: integer("icu_beds").default(0),
   availableIcuBeds: integer("available_icu_beds").default(0),
   emergencyStatus: varchar("emergency_status", { length: 50 }).default("available"), // 'available', 'busy', 'full'
+  emergencyServices: text("emergency_services").array(),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -37,11 +39,17 @@ export const hospitals = pgTable("hospitals", {
 export const ambulances = pgTable("ambulances", {
   id: serial("id").primaryKey(),
   vehicleNumber: varchar("vehicle_number", { length: 50 }).notNull().unique(),
+  userId: integer("user_id").references(() => users.id),
   operatorId: integer("operator_id").references(() => users.id),
   hospitalId: integer("hospital_id").references(() => hospitals.id),
   currentLatitude: decimal("current_latitude", { precision: 10, scale: 8 }),
   currentLongitude: decimal("current_longitude", { precision: 11, scale: 8 }),
   status: varchar("status", { length: 50 }).default("available"), // 'available', 'dispatched', 'en_route', 'at_scene', 'transporting'
+  operatorPhone: varchar("operator_phone", { length: 20 }),
+  licenseNumber: varchar("license_number", { length: 100 }),
+  certification: varchar("certification", { length: 100 }),
+  equipmentLevel: varchar("equipment_level", { length: 100 }),
+  hospitalAffiliation: varchar("hospital_affiliation", { length: 255 }),
   isActive: boolean("is_active").default(true),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -56,12 +64,15 @@ export const emergencyRequests = pgTable("emergency_requests", {
   longitude: decimal("longitude", { precision: 11, scale: 8 }).notNull(),
   address: text("address"),
   priority: varchar("priority", { length: 50 }).default("medium"), // 'low', 'medium', 'high', 'critical'
-  status: varchar("status", { length: 50 }).default("pending"), // 'pending', 'dispatched', 'en_route', 'at_scene', 'transporting', 'completed', 'cancelled'
+  status: varchar("status", { length: 50 }).default("pending"), // 'pending', 'accepted', 'dispatched', 'en_route', 'at_scene', 'transporting', 'completed', 'cancelled'
   patientCondition: text("patient_condition"),
   notes: text("notes"),
   requestedAt: timestamp("requested_at").defaultNow(),
   dispatchedAt: timestamp("dispatched_at"),
   completedAt: timestamp("completed_at"),
+  estimatedArrival: integer("estimated_arrival"), // ETA in minutes
+  patientChosenHospitalId: integer("patient_chosen_hospital_id").references(() => hospitals.id),
+  assignedBedNumber: varchar("assigned_bed_number", { length: 20 }), // bed assigned to patient when admitted
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });
@@ -71,7 +82,10 @@ export const bedStatusLogs = pgTable("bed_status_logs", {
   hospitalId: integer("hospital_id").references(() => hospitals.id).notNull(),
   bedType: varchar("bed_type", { length: 50 }).notNull(), // 'general', 'icu', 'trauma'
   bedNumber: varchar("bed_number", { length: 20 }).notNull(),
+  wardDescription: varchar("ward_description", { length: 100 }), // ward name like 'Cardiac ICU', 'Maternity Ward'
+  floorNumber: integer("floor_number"),
   status: varchar("status", { length: 50 }).notNull(), // 'available', 'occupied', 'maintenance', 'reserved'
+  patientName: varchar("patient_name", { length: 100 }), // name of patient occupying the bed
   patientId: integer("patient_id").references(() => users.id),
   updatedBy: integer("updated_by").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow(),
@@ -143,6 +157,24 @@ export const loginSchema = z.object({
 
 export const registerSchema = insertUserSchema.extend({
   confirmPassword: z.string(),
+  // Hospital specific fields
+  hospitalName: z.string().optional(),
+  hospitalAddress: z.string().optional(),
+  totalBeds: z.number().optional(),
+  icuBeds: z.number().optional(),
+  emergencyServices: z.array(z.string()).optional(),
+  // Ambulance specific fields
+  vehicleNumber: z.string().optional(),
+  licenseNumber: z.string().optional(),
+  certification: z.string().optional(),
+  equipmentLevel: z.string().optional(),
+  hospitalAffiliation: z.string().optional(),
+  selectedHospitalId: z.number().optional(),
+  // Patient specific fields
+  emergencyContact: z.string().optional(),
+  medicalConditions: z.string().optional(),
+  bloodType: z.string().optional(),
+  allergies: z.string().optional(),
 }).refine((data) => data.password === data.confirmPassword, {
   message: "Passwords don't match",
   path: ["confirmPassword"],

@@ -1,11 +1,17 @@
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { useAuth } from "@/hooks/use-auth";
+import { NotificationSystem } from "@/components/notification-system";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { LocationMap } from "@/components/LocationMap";
+import { StableNavigationMap } from "@/components/stable-navigation-map";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { useGeolocation } from "@/hooks/use-geolocation";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { 
   Ambulance, 
   AlertTriangle, 
@@ -15,89 +21,285 @@ import {
   MessageSquare,
   Navigation,
   User,
-  Phone
+  Phone,
+  X,
+  Heart,
+  Shield,
+  Zap,
+  Package
 } from "lucide-react";
 
+// Mock equipment data for each ambulance
+const getEquipmentByVehicle = (vehicleNumber: string) => {
+  const equipmentSets = {
+    'AMB-001': [
+      { name: 'Defibrillator', status: 'operational', icon: Zap },
+      { name: 'Oxygen Tank', status: 'full', icon: Heart },
+      { name: 'First Aid Kit', status: 'stocked', icon: Package },
+      { name: 'Stretcher', status: 'ready', icon: Shield }
+    ],
+    'AMB-002': [
+      { name: 'Advanced Defibrillator', status: 'operational', icon: Zap },
+      { name: 'Ventilator', status: 'operational', icon: Heart },
+      { name: 'IV Equipment', status: 'stocked', icon: Package },
+      { name: 'Cardiac Monitor', status: 'operational', icon: Shield }
+    ],
+    'AMB-003': [
+      { name: 'Paramedic Defibrillator', status: 'operational', icon: Zap },
+      { name: 'Advanced Airway Kit', status: 'ready', icon: Heart },
+      { name: 'Drug Box', status: 'secured', icon: Package },
+      { name: 'Spinal Board', status: 'ready', icon: Shield }
+    ],
+    'AMB-004': [
+      { name: 'Multi-Parameter Monitor', status: 'operational', icon: Zap },
+      { name: 'Intubation Kit', status: 'ready', icon: Heart },
+      { name: 'Emergency Drugs', status: 'secured', icon: Package },
+      { name: 'Vacuum Mattress', status: 'ready', icon: Shield }
+    ],
+    'AMB-005': [
+      { name: 'Critical Care Monitor', status: 'operational', icon: Zap },
+      { name: 'Transport Ventilator', status: 'operational', icon: Heart },
+      { name: 'Blood Products Cooler', status: 'temperature OK', icon: Package },
+      { name: 'ECMO Device', status: 'standby', icon: Shield }
+    ]
+  };
+  return equipmentSets[vehicleNumber] || [];
+};
+
 export default function AmbulanceDashboard() {
+  const { user } = useAuth();
   const { location } = useGeolocation();
-  const { sendMessage } = useWebSocket();
-  const [chatMessage, setChatMessage] = useState("");
-  const [selectedRequest, setSelectedRequest] = useState<any>(null);
+  const { sendMessage, lastMessage } = useWebSocket();
+  const [, setLocation] = useLocation();
+  const [showRejectDialog, setShowRejectDialog] = useState<any>(null);
+  const [isJourneyActive, setIsJourneyActive] = useState(false);
+  const [journeyETA, setJourneyETA] = useState<number>(0);
+  const [showNavigationMap, setShowNavigationMap] = useState(false);
 
   const { data: emergencyRequests, isLoading: requestsLoading } = useQuery({
     queryKey: ['/api/emergency/requests'],
-    refetchInterval: 5000,
+    refetchInterval: 30000, // Reduce from 5s to 30s to prevent constant reloading
+    refetchIntervalInBackground: false,
   });
 
-  const { data: communications } = useQuery({
-    queryKey: ['/api/communications', selectedRequest?.id],
-    enabled: !!selectedRequest,
-    refetchInterval: 2000,
-  });
-
-  // Update location periodically
+  // Update location less frequently to reduce server load
   useEffect(() => {
-    if (location) {
-      sendMessage({
-        type: 'location_update',
+    if (!location) return;
+    
+    const updateLocation = () => {
+      sendMessage('location_update', {
         lat: location.latitude,
         lng: location.longitude
       });
+    };
+    
+    // Update immediately, then every 30 seconds instead of constantly
+    updateLocation();
+    const interval = setInterval(updateLocation, 30000);
+    
+    return () => clearInterval(interval);
+  }, [location?.latitude, location?.longitude, sendMessage]);
+
+  // Accept request mutation - initial acceptance
+  const acceptRequestMutation = useMutation({
+    mutationFn: async ({ requestId, ambulanceId }: { requestId: number, ambulanceId: number }) => {
+      const response = await apiRequest('PUT', `/api/emergency/request/${requestId}`, {
+        status: 'accepted',
+        ambulanceId: ambulanceId
+      });
+      return response.json();
+    },
+    onSuccess: (data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+      // Show navigation map instead of navigating away
+      setShowNavigationMap(true);
+    },
+    onError: (error) => {
+      console.error('Failed to accept request:', error);
+      alert('Failed to accept request. Please try again.');
+    },
+  });
+
+  const handleStartJourney = () => {
+    setIsJourneyActive(true);
+    // Update ambulance status to en_route - use the most recent request
+    if (assignedRequests.length > 0) {
+      const mostRecentRequest = assignedRequests[0]; // Already sorted by date desc
+      
+      console.log('Starting journey for request:', mostRecentRequest.id, 'Status:', mostRecentRequest.status);
+      sendMessage('ambulance_status_update', {
+        ambulanceId: user?.ambulanceProfile?.id,
+        status: 'en_route',
+        requestId: mostRecentRequest.id
+      });
     }
-  }, [location, sendMessage]);
+  };
+
+  const handleJourneyUpdate = (eta: number, distance: number) => {
+    // Convert ETA from seconds to minutes for local display only
+    const etaInMinutes = Math.round(eta / 60);
+    setJourneyETA(etaInMinutes);
+    
+    // No broadcasting - just local state update
+  };
+
+  // Simple status update mutation (removed auto-upgrade logic)
+  const updateStatusMutation = useMutation({
+    mutationFn: async ({ requestId, status }: { requestId: number, status: string }) => {
+      const response = await apiRequest('PUT', `/api/emergency/request/${requestId}`, {
+        status
+      });
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+    },
+  });
+
+  // Reject request mutation
+  const rejectRequestMutation = useMutation({
+    mutationFn: async ({ requestId }: { requestId: number }) => {
+      const response = await apiRequest('PUT', `/api/emergency/request/${requestId}`, {
+        status: 'cancelled'
+      });
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+      setShowRejectDialog(null);
+    },
+    onError: (error) => {
+      console.error('Failed to reject request:', error);
+      alert('Failed to reject request. Please try again.');
+    },
+  });
+
+  // Delete request mutation
+  const deleteRequestMutation = useMutation({
+    mutationFn: async (requestId: number) => {
+      const response = await apiRequest('DELETE', `/api/emergency/request/${requestId}`);
+      return response.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/emergency/requests'] });
+    },
+    onError: (error) => {
+      console.error('Failed to delete request:', error);
+      alert('Unable to delete request. Please try again.');
+    },
+  });
 
   const handleAcceptRequest = (request: any) => {
-    setSelectedRequest(request);
-    // Update request status
-    fetch(`/api/emergency/request/${request.id}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('token')}`
-      },
-      body: JSON.stringify({
-        status: 'dispatched',
-        ambulanceId: 1 // Should be actual ambulance ID
-      })
+    console.log('Accepting request:', { 
+      requestId: request.id, 
+      ambulanceId: user?.ambulanceProfile?.id,
+      userProfile: user?.ambulanceProfile 
+    });
+    acceptRequestMutation.mutate({
+      requestId: request.id,
+      ambulanceId: user?.ambulanceProfile?.id
     });
   };
 
-  const handleSendMessage = () => {
-    if (chatMessage.trim() && selectedRequest) {
-      sendMessage({
-        type: 'chat_message',
-        emergencyRequestId: selectedRequest.id,
-        receiverId: selectedRequest.hospitalId,
-        receiverRole: 'hospital',
-        message: chatMessage
+  const handleRejectRequest = (request: any) => {
+    setShowRejectDialog(request);
+  };
+
+  const confirmRejectRequest = () => {
+    if (showRejectDialog) {
+      rejectRequestMutation.mutate({
+        requestId: showRejectDialog.id
       });
-      setChatMessage("");
     }
   };
 
-  const pendingRequests = emergencyRequests?.filter((req: any) => 
-    req.status === 'pending' || req.status === 'dispatched'
-  ) || [];
+  const handleDeleteRequest = (requestId: number) => {
+    if (confirm('Are you sure you want to delete this request from history?')) {
+      deleteRequestMutation.mutate(requestId);
+    }
+  };
+
+
+
+  const pendingRequests = Array.isArray(emergencyRequests) ? emergencyRequests.filter((req: any) => 
+    req.status === 'pending'
+  ) : [];
+  const assignedRequests = Array.isArray(emergencyRequests) ? emergencyRequests.filter((req: any) => 
+    req.ambulanceId === user?.ambulanceProfile?.id
+  ).sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) : [];
+  
+  // Get equipment for current ambulance
+  const vehicleNumber = user?.ambulanceProfile?.vehicleNumber;
+  const equipmentList = vehicleNumber ? getEquipmentByVehicle(vehicleNumber) : [];
+
+  // Removed excessive debug logging to prevent continuous console spam
 
   return (
-    <div className="max-w-6xl mx-auto p-4">
+    <div className="max-w-6xl mx-auto p-4 space-y-6">
+      {/* Reject Confirmation Dialog */}
+      <Dialog open={!!showRejectDialog} onOpenChange={() => setShowRejectDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reject Emergency Request</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to reject this emergency request? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-4 mt-4">
+            <Button variant="outline" onClick={() => setShowRejectDialog(null)}>
+              Cancel
+            </Button>
+            <Button 
+              variant="destructive" 
+              onClick={confirmRejectRequest}
+              disabled={rejectRequestMutation.isPending}
+            >
+              {rejectRequestMutation.isPending ? 'Rejecting...' : 'Reject Request'}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Navigation Map - Show prominently when request is accepted */}
+      {showNavigationMap && assignedRequests.length > 0 && location && (
+        <StableNavigationMap
+          ambulanceLocation={{
+            latitude: location.latitude,
+            longitude: location.longitude
+          }}
+          patientLocation={{
+            latitude: parseFloat(assignedRequests[0].latitude),
+            longitude: parseFloat(assignedRequests[0].longitude)
+          }}
+          onStartJourney={handleStartJourney}
+          onJourneyUpdate={(eta, distance) => handleJourneyUpdate(eta, distance)}
+          isJourneyActive={isJourneyActive}
+        />
+      )}
+
       {/* Status Header */}
-      <Card className="mb-6">
+      <Card>
         <CardContent className="p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center">
               <div className="w-4 h-4 bg-green-500 rounded-full mr-3 animate-pulse"></div>
               <div>
-                <div className="font-semibold text-gray-800">Ambulance Unit A-204</div>
+                <div className="font-semibold text-gray-800">
+                  {user?.ambulanceProfile?.vehicleNumber ? 
+                    `Ambulance Unit ${user.ambulanceProfile.vehicleNumber}` : 
+                    'Ambulance Unit (No Vehicle Assigned)'
+                  }
+                </div>
                 <div className="text-sm text-gray-600">Status: Available</div>
               </div>
             </div>
             <div className="flex items-center space-x-6">
+              {user && <NotificationSystem userRole={user.role} userId={user.id} />}
               <div className="text-center">
                 <div className="text-2xl font-bold text-blue-600">
                   {pendingRequests.length}
                 </div>
-                <div className="text-sm text-gray-600">Active Calls</div>
+                <div className="text-sm text-gray-600">Pending Requests</div>
               </div>
               <div className="text-center">
                 <div className="text-2xl font-bold text-green-600">12</div>
@@ -108,7 +310,7 @@ export default function AmbulanceDashboard() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Emergency Requests */}
         <Card>
           <CardHeader>
@@ -133,11 +335,21 @@ export default function AmbulanceDashboard() {
             ) : pendingRequests.length > 0 ? (
               <div className="space-y-4">
                 {pendingRequests.map((request: any) => (
-                  <div key={request.id} className={`border-l-4 p-4 rounded-lg ${
+                  <div key={request.id} className={`relative border-l-4 p-4 rounded-lg group hover:shadow-md transition-shadow ${
                     request.priority === 'critical' ? 'border-red-500 bg-red-50' :
                     request.priority === 'high' ? 'border-orange-500 bg-orange-50' :
                     'border-yellow-500 bg-yellow-50'
                   }`}>
+                    {/* Delete button for completed requests */}
+                    {(request.status === 'completed' || request.status === 'cancelled') && (
+                      <button
+                        onClick={() => handleDeleteRequest(request.id)}
+                        className="absolute top-2 right-2 w-6 h-6 bg-red-500 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center hover:bg-red-600"
+                        title="Delete request"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center">
                         <AlertTriangle className={`w-4 h-4 mr-2 ${
@@ -150,154 +362,209 @@ export default function AmbulanceDashboard() {
                           request.priority === 'high' ? 'text-orange-700' :
                           'text-yellow-700'
                         }`}>
-                          {request.priority.toUpperCase()} PRIORITY
+                          {request.patientCondition || 'Medical Emergency'}
                         </span>
                       </div>
-                      <span className="text-sm text-gray-600">
-                        {new Date(request.requestedAt).toLocaleTimeString()}
-                      </span>
+                      <Badge variant="outline" className="text-xs">
+                        {request.priority.toUpperCase()}
+                      </Badge>
                     </div>
-                    <div className="space-y-2 mb-3">
-                      <div className="flex items-center">
-                        <User className="w-4 h-4 mr-2 text-gray-500" />
-                        <span className="text-sm text-gray-700">Patient: Anonymous</span>
+                    
+                    <div className="space-y-2 mb-4">
+                      <div className="flex items-center text-sm text-gray-600">
+                        <User className="w-4 h-4 mr-2" />
+                        Patient: {request.patient?.firstName || request.patient?.username || 'Unknown'}
                       </div>
-                      <div className="flex items-center">
-                        <MapPin className="w-4 h-4 mr-2 text-gray-500" />
-                        <span className="text-sm text-gray-700">
-                          {request.address || 'Location coordinates available'}
-                        </span>
+                      <div className="flex items-center text-sm text-gray-600">
+                        <MapPin className="w-4 h-4 mr-2" />
+                        {request.address}
                       </div>
-                      {request.patientCondition && (
-                        <div className="text-sm text-gray-700">
-                          Condition: {request.patientCondition}
+                      <div className="flex items-center text-sm text-gray-600">
+                        <Clock className="w-4 h-4 mr-2" />
+                        {new Date(request.requestedAt).toLocaleTimeString()}
+                      </div>
+                      {request.notes && (
+                        <div className="text-sm text-gray-600">
+                          <strong>Notes:</strong> {request.notes}
                         </div>
                       )}
                     </div>
-                    <div className="flex space-x-3">
+                    
+                    <div className="flex gap-2">
                       <Button 
                         onClick={() => handleAcceptRequest(request)}
+                        disabled={acceptRequestMutation.isPending}
                         className="flex-1 bg-green-600 hover:bg-green-700"
-                        disabled={request.status === 'dispatched'}
                       >
                         <CheckCircle className="w-4 h-4 mr-2" />
-                        {request.status === 'dispatched' ? 'Dispatched' : 'Accept'}
+                        {acceptRequestMutation.isPending ? 'Accepting...' : 'Accept'}
                       </Button>
                       <Button 
-                        variant="outline" 
+                        variant="destructive"
+                        onClick={() => handleRejectRequest(request)}
+                        disabled={rejectRequestMutation.isPending}
                         className="flex-1"
-                        disabled={request.status === 'dispatched'}
                       >
-                        <Navigation className="w-4 h-4 mr-2" />
-                        View Route
+                        <X className="w-4 h-4 mr-2" />
+                        Reject
                       </Button>
                     </div>
                   </div>
                 ))}
               </div>
             ) : (
-              <div className="text-center py-8 text-gray-500">
-                <Ambulance className="w-12 h-12 mx-auto mb-4 text-gray-400" />
-                <p>No active emergency requests</p>
-                <p className="text-sm">Standing by for emergencies</p>
+              <div className="text-center py-8">
+                <div className="mx-auto w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center mb-4">
+                  <Ambulance className="w-8 h-8 text-gray-400" />
+                </div>
+                <p className="text-gray-500">No pending emergency requests</p>
               </div>
             )}
           </CardContent>
         </Card>
 
-        {/* Route & Communication */}
-        <div className="space-y-6">
-          {/* Route Information */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Route & Navigation</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="bg-gray-100 rounded-lg h-48 flex items-center justify-center mb-4">
-                <div className="text-center">
-                  <MapPin className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-                  <div className="text-gray-600">Google Maps Integration</div>
-                  <div className="text-sm text-gray-500">Real-time route optimization</div>
+        {/* Quick Actions */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center">
+              <Navigation className="w-5 h-5 mr-2" />
+              Quick Actions
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              <Button variant="outline" className="w-full justify-start">
+                <MapPin className="w-4 h-4 mr-2" />
+                Update Current Location
+              </Button>
+              <Button variant="outline" className="w-full justify-start">
+                <Phone className="w-4 h-4 mr-2" />
+                Emergency Contacts
+              </Button>
+              <Button variant="outline" className="w-full justify-start">
+                <MessageSquare className="w-4 h-4 mr-2" />
+                Communication Center
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Equipment Status */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Vehicle Equipment</CardTitle>
+            <CardDescription>
+              {vehicleNumber ? `Equipment Status for ${vehicleNumber}` : 'No vehicle assigned'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {equipmentList.length > 0 ? (
+              <div className="space-y-3">
+                {equipmentList.map((equipment, index) => {
+                  const IconComponent = equipment.icon;
+                  return (
+                    <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center">
+                        <IconComponent className="w-5 h-5 mr-3 text-blue-600" />
+                        <div>
+                          <div className="font-medium text-gray-900">{equipment.name}</div>
+                          <div className="text-sm text-gray-600">Status: {equipment.status}</div>
+                        </div>
+                      </div>
+                      <div className={`w-3 h-3 rounded-full ${
+                        equipment.status.includes('operational') || equipment.status.includes('ready') || equipment.status.includes('full') || equipment.status.includes('stocked') || equipment.status.includes('secured') || equipment.status.includes('OK') ? 
+                        'bg-green-500' : 
+                        equipment.status.includes('standby') ? 'bg-yellow-500' : 'bg-red-500'
+                      }`}></div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                <Package className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+                <p>No equipment data available</p>
+                <p className="text-sm">Vehicle assignment required</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Coordinates Display */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center">
+              <User className="h-5 w-5 mr-2 text-red-500" />
+              Patient Coordinates
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {assignedRequests.length > 0 && assignedRequests[0]?.patientLatitude && assignedRequests[0]?.patientLongitude ? (
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-600">Latitude:</span>
+                  <span className="font-mono text-sm">{parseFloat(assignedRequests[0].patientLatitude).toFixed(6)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-600">Longitude:</span>
+                  <span className="font-mono text-sm">{parseFloat(assignedRequests[0].patientLongitude).toFixed(6)}</span>
+                </div>
+                <Badge variant="outline" className="text-xs text-green-600">Emergency Request</Badge>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-sm text-gray-500">No emergency requests</p>
+                <Badge variant="outline" className="text-xs text-orange-600">Using Operator Location</Badge>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-lg flex items-center">
+              <Ambulance className="h-5 w-5 mr-2 text-blue-500" />
+              Current Coordinates
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {user?.ambulanceProfile?.currentLatitude && user?.ambulanceProfile?.currentLongitude ? (
+              <div className="space-y-2">
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-600">Latitude:</span>
+                  <span className="font-mono text-sm">{parseFloat(user.ambulanceProfile.currentLatitude).toFixed(6)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-sm text-gray-600">Longitude:</span>
+                  <span className="font-mono text-sm">{parseFloat(user.ambulanceProfile.currentLongitude).toFixed(6)}</span>
                 </div>
               </div>
-              
-              {selectedRequest && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between p-3 bg-blue-50 rounded-lg">
-                    <div className="flex items-center">
-                      <Navigation className="w-5 h-5 text-blue-600 mr-3" />
-                      <div>
-                        <div className="font-medium text-gray-800">Patient Location</div>
-                        <div className="text-sm text-gray-600">
-                          {selectedRequest.address || 'GPS coordinates'}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg">
-                    <div className="flex items-center">
-                      <Building2 className="w-5 h-5 text-green-600 mr-3" />
-                      <div>
-                        <div className="font-medium text-gray-800">Destination</div>
-                        <div className="text-sm text-gray-600">Nearest Available Hospital</div>
-                      </div>
-                    </div>
-                    <span className="text-sm font-medium text-green-600">ETA: 8 min</span>
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Communication */}
-          {selectedRequest && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Hospital Communication</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="bg-gray-50 rounded-lg p-4 h-48 overflow-y-auto mb-4">
-                  {communications && communications.length > 0 ? (
-                    <div className="space-y-3">
-                      {communications.map((msg: any) => (
-                        <div key={msg.id} className="flex items-start">
-                          <div className="bg-blue-600 text-white rounded-full w-8 h-8 flex items-center justify-center text-sm mr-3">
-                            {msg.senderId === 'hospital' ? '🏥' : '🚑'}
-                          </div>
-                          <div className="flex-1">
-                            <div className="bg-white p-3 rounded-lg shadow-sm">
-                              <div className="text-sm text-gray-600">{msg.message}</div>
-                            </div>
-                            <div className="text-xs text-gray-500 mt-1">
-                              {new Date(msg.createdAt).toLocaleTimeString()}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-center text-gray-500 py-8">
-                      <MessageSquare className="w-8 h-8 mx-auto mb-2 text-gray-400" />
-                      <p>No messages yet</p>
-                    </div>
-                  )}
-                </div>
-                <div className="flex space-x-2">
-                  <Input
-                    placeholder="Type a message..."
-                    value={chatMessage}
-                    onChange={(e) => setChatMessage(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                  />
-                  <Button onClick={handleSendMessage} disabled={!chatMessage.trim()}>
-                    <MessageSquare className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+            ) : (
+              <p className="text-sm text-gray-500">GPS location pending...</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Location Map - Hide when navigation is active */}
+      {!showNavigationMap && (
+        <LocationMap 
+          title="Patient & Ambulance Location"
+          height="300px"
+          showRefreshButton={true}
+          showCurrentAmbulance={true}
+          currentAmbulanceId={user?.ambulanceProfile?.id}
+          patientLocation={assignedRequests.length > 0 ? {
+            latitude: parseFloat(assignedRequests[0]?.patientLatitude || '0'),
+            longitude: parseFloat(assignedRequests[0]?.patientLongitude || '0')
+          } : null}
+          onLocationChange={(newLocation) => {
+            console.log('Ambulance location updated:', newLocation);
+          }}
+        />
+      )}
     </div>
   );
 }

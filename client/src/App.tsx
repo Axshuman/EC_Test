@@ -5,9 +5,12 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import Login from "@/pages/login";
-import PatientDashboard from "@/pages/patient";
+import Register from "@/pages/register";
+import EnhancedPatientDashboard from "@/pages/enhanced-patient";
 import AmbulanceDashboard from "@/pages/ambulance";
+import AmbulanceNavigation from "@/pages/ambulance-navigation";
 import HospitalDashboard from "@/pages/hospital";
+import AdminDashboard from "@/pages/admin";
 import NotFound from "@/pages/not-found";
 import { WebSocketProvider } from "@/hooks/use-websocket";
 import { RoleHeader } from "@/components/role-header";
@@ -24,7 +27,12 @@ function Router() {
   }
 
   if (!user) {
-    return <Login />;
+    return (
+      <Switch>
+        <Route path="/register" component={Register} />
+        <Route component={Login} />
+      </Switch>
+    );
   }
 
   return (
@@ -32,18 +40,22 @@ function Router() {
       <div className="min-h-screen bg-neutral-50">
         <RoleHeader user={user} />
         <Switch>
+          <Route path="/ambulance/navigate/:requestId" component={AmbulanceNavigation} />
           <Route path="/" component={() => {
             switch (user.role) {
               case 'patient':
-                return <PatientDashboard />;
+                return <EnhancedPatientDashboard />;
               case 'ambulance':
                 return <AmbulanceDashboard />;
               case 'hospital':
                 return <HospitalDashboard />;
+              case 'admin':
+                return <AdminDashboard />;
               default:
                 return <NotFound />;
             }
           }} />
+          <Route path="/admin" component={AdminDashboard} />
           <Route component={NotFound} />
         </Switch>
       </div>

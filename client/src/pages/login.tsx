@@ -83,7 +83,7 @@ export default function Login() {
             <Tabs defaultValue="login" className="w-full">
               <TabsList className="grid w-full grid-cols-2">
                 <TabsTrigger value="login">Login</TabsTrigger>
-                <TabsTrigger value="register">Register</TabsTrigger>
+                <TabsTrigger value="register" onClick={() => window.location.href = '/register'}>Register</TabsTrigger>
               </TabsList>
               
               <TabsContent value="login" className="space-y-4">
@@ -116,7 +116,13 @@ export default function Login() {
               </TabsContent>
               
               <TabsContent value="register" className="space-y-4">
-                <form onSubmit={handleRegister} className="space-y-4">
+                <div className="text-center p-8">
+                  <p className="text-gray-600 mb-4">Creating a new account? Click the button below.</p>
+                  <Button onClick={() => window.location.href = '/register'} className="bg-blue-600 hover:bg-blue-700">
+                    Go to Registration Page
+                  </Button>
+                </div>
+                <form onSubmit={handleRegister} className="space-y-4" style={{display: 'none'}}>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label htmlFor="firstName">First Name</Label>
