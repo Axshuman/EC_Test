@@ -28,6 +28,7 @@ import {
   Zap,
   Package
 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 
 // Mock equipment data for each ambulance
 const getEquipmentByVehicle = (vehicleNumber: string) => {
@@ -64,6 +65,30 @@ const getEquipmentByVehicle = (vehicleNumber: string) => {
     ]
   };
   return equipmentSets[vehicleNumber] || [];
+};
+
+// Function to get badge color based on status
+const getStatusBadgeColor = (status: string) => {
+  switch (status.toLowerCase()) {
+    case 'pending':
+      return 'bg-yellow-500 hover:bg-yellow-600';
+    case 'accepted':
+      return 'bg-blue-500 hover:bg-blue-600';
+    case 'dispatched':
+      return 'bg-purple-500 hover:bg-purple-600';
+    case 'en_route':
+      return 'bg-orange-500 hover:bg-orange-600';
+    case 'at_scene':
+      return 'bg-indigo-500 hover:bg-indigo-600';
+    case 'transporting':
+      return 'bg-teal-500 hover:bg-teal-600';
+    case 'completed':
+      return 'bg-green-500 hover:bg-green-600';
+    case 'cancelled':
+      return 'bg-red-500 hover:bg-red-600';
+    default:
+      return 'bg-gray-500 hover:bg-gray-600';
+  }
 };
 
 export default function AmbulanceDashboard() {
@@ -234,7 +259,7 @@ export default function AmbulanceDashboard() {
   );
   
   // Auto-restore journey state if there's an active request
-  React.useEffect(() => {
+  useEffect(() => {
     if (activeRequest && !isJourneyActive) {
       console.log('🔄 Auto-restoring journey state for request:', activeRequest.id);
       setIsJourneyActive(true);
