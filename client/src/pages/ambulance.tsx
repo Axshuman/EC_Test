@@ -28,6 +28,7 @@ import {
   Zap,
   Package
 } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 
 // Mock equipment data for each ambulance
 const getEquipmentByVehicle = (vehicleNumber: string) => {
@@ -64,6 +65,30 @@ const getEquipmentByVehicle = (vehicleNumber: string) => {
     ]
   };
   return equipmentSets[vehicleNumber] || [];
+};
+
+// Function to get badge color based on status
+const getStatusBadgeColor = (status: string) => {
+  switch (status.toLowerCase()) {
+    case 'pending':
+      return 'bg-yellow-500 hover:bg-yellow-600';
+    case 'accepted':
+      return 'bg-blue-500 hover:bg-blue-600';
+    case 'dispatched':
+      return 'bg-purple-500 hover:bg-purple-600';
+    case 'en_route':
+      return 'bg-orange-500 hover:bg-orange-600';
+    case 'at_scene':
+      return 'bg-indigo-500 hover:bg-indigo-600';
+    case 'transporting':
+      return 'bg-teal-500 hover:bg-teal-600';
+    case 'completed':
+      return 'bg-green-500 hover:bg-green-600';
+    case 'cancelled':
+      return 'bg-red-500 hover:bg-red-600';
+    default:
+      return 'bg-gray-500 hover:bg-gray-600';
+  }
 };
 
 export default function AmbulanceDashboard() {
@@ -225,8 +250,22 @@ export default function AmbulanceDashboard() {
     req.status === 'pending'
   ) : [];
   const assignedRequests = Array.isArray(emergencyRequests) ? emergencyRequests.filter((req: any) => 
-    req.ambulanceId === user?.ambulanceProfile?.id
+    req.ambulanceId === user?.ambulanceProfile?.id && ['accepted', 'dispatched', 'en_route', 'at_scene', 'transporting'].includes(req.status)
   ).sort((a: any, b: any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) : [];
+  
+  // Get active request for persistent tracking
+  const activeRequest = assignedRequests.find((req: any) => 
+    ['accepted', 'dispatched', 'en_route', 'at_scene', 'transporting'].includes(req.status)
+  );
+  
+  // Auto-restore journey state if there's an active request
+  useEffect(() => {
+    if (activeRequest && !isJourneyActive) {
+      console.log('🔄 Auto-restoring journey state for request:', activeRequest.id);
+      setIsJourneyActive(true);
+      setShowNavigationMap(true);
+    }
+  }, [activeRequest, isJourneyActive]);
   
   // Get equipment for current ambulance
   const vehicleNumber = user?.ambulanceProfile?.vehicleNumber;
@@ -491,6 +530,80 @@ export default function AmbulanceDashboard() {
         </Card>
       </div>
 
+      {/* Current Request Status */}
+      {activeRequest && (
+        <Card className="mb-6 border-l-4 border-l-blue-500">
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <span>Current Active Request</span>
+              <Badge className={`${getStatusBadgeColor(activeRequest.status)} text-white`}>
+                {activeRequest.status.toUpperCase()}
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <div className="text-sm font-semibold text-gray-700 mb-2">Patient Details</div>
+                <div className="space-y-2">
+                  <div className="flex items-center text-sm">
+                    <User className="w-4 h-4 mr-2 text-gray-500" />
+                    <span>Patient: {activeRequest.patient?.firstName || activeRequest.patient?.username || 'Unknown'}</span>
+                  </div>
+                  <div className="flex items-center text-sm">
+                    <MapPin className="w-4 h-4 mr-2 text-gray-500" />
+                    <span>{activeRequest.address}</span>
+                  </div>
+                  <div className="flex items-center text-sm">
+                    <Clock className="w-4 h-4 mr-2 text-gray-500" />
+                    <span>{formatDistanceToNow(new Date(activeRequest.createdAt), { addSuffix: true })}</span>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-gray-700 mb-2">Request Details</div>
+                <div className="space-y-2">
+                  <div className="text-sm">
+                    <span className="font-medium">Condition:</span> {activeRequest.patientCondition || 'Not specified'}
+                  </div>
+                  <div className="text-sm">
+                    <span className="font-medium">Priority:</span> {activeRequest.priority || 'Medium'}
+                  </div>
+                  <div className="text-sm">
+                    <span className="font-medium">Request ID:</span> #{activeRequest.id}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              {activeRequest.status === 'accepted' && (
+                <Button
+                  onClick={handleStartJourney}
+                  className="bg-green-600 hover:bg-green-700 text-white"
+                  size="sm"
+                >
+                  <Navigation className="h-4 w-4 mr-1" />
+                  Start Journey
+                </Button>
+              )}
+              {['dispatched', 'en_route', 'at_scene'].includes(activeRequest.status) && (
+                <Button
+                  onClick={() => {
+                    setShowNavigationMap(true);
+                    setIsJourneyActive(true);
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white"
+                  size="sm"
+                >
+                  <MapPin className="h-4 w-4 mr-1" />
+                  View Navigation
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Coordinates Display */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <Card>
@@ -501,22 +614,22 @@ export default function AmbulanceDashboard() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {assignedRequests.length > 0 && assignedRequests[0]?.patientLatitude && assignedRequests[0]?.patientLongitude ? (
+            {activeRequest && activeRequest.latitude && activeRequest.longitude ? (
               <div className="space-y-2">
                 <div className="flex justify-between">
                   <span className="text-sm text-gray-600">Latitude:</span>
-                  <span className="font-mono text-sm">{parseFloat(assignedRequests[0].patientLatitude).toFixed(6)}</span>
+                  <span className="font-mono text-sm">{parseFloat(activeRequest.latitude).toFixed(6)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-sm text-gray-600">Longitude:</span>
-                  <span className="font-mono text-sm">{parseFloat(assignedRequests[0].patientLongitude).toFixed(6)}</span>
+                  <span className="font-mono text-sm">{parseFloat(activeRequest.longitude).toFixed(6)}</span>
                 </div>
-                <Badge variant="outline" className="text-xs text-green-600">Emergency Request</Badge>
+                <Badge variant="outline" className="text-xs text-green-600">Active Emergency</Badge>
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="text-sm text-gray-500">No emergency requests</p>
-                <Badge variant="outline" className="text-xs text-orange-600">Using Operator Location</Badge>
+                <p className="text-sm text-gray-500">No active emergency requests</p>
+                <Badge variant="outline" className="text-xs text-orange-600">Standby</Badge>
               </div>
             )}
           </CardContent>
@@ -540,6 +653,7 @@ export default function AmbulanceDashboard() {
                   <span className="text-sm text-gray-600">Longitude:</span>
                   <span className="font-mono text-sm">{parseFloat(user.ambulanceProfile.currentLongitude).toFixed(6)}</span>
                 </div>
+                <Badge variant="outline" className="text-xs text-blue-600">Live GPS</Badge>
               </div>
             ) : (
               <p className="text-sm text-gray-500">GPS location pending...</p>
@@ -556,9 +670,9 @@ export default function AmbulanceDashboard() {
           showRefreshButton={true}
           showCurrentAmbulance={true}
           currentAmbulanceId={user?.ambulanceProfile?.id}
-          patientLocation={assignedRequests.length > 0 ? {
-            latitude: parseFloat(assignedRequests[0]?.patientLatitude || '0'),
-            longitude: parseFloat(assignedRequests[0]?.patientLongitude || '0')
+          patientLocation={activeRequest ? {
+            latitude: parseFloat(activeRequest.latitude || '0'),
+            longitude: parseFloat(activeRequest.longitude || '0')
           } : null}
           onLocationChange={(newLocation) => {
             console.log('Ambulance location updated:', newLocation);

@@ -1,3 +1,4 @@
+/// <reference types="@types/google.maps" />
 import React, { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -123,7 +124,7 @@ export function LocationMap({
     try {
       const token = localStorage.getItem('token');
       
-      // Priority: 1) Patient location, 2) Operator's current location
+      // Always use a reference location - prioritize patient, then user location, then fallback to Indore
       let referenceLocation = null;
       let source = '';
       
@@ -139,35 +140,62 @@ export function LocationMap({
           longitude: location.longitude
         };
         source = 'operator_location';
+      } else {
+        // Fallback to Indore city center
+        referenceLocation = { latitude: 22.7196, longitude: 75.8577 };
+        source = 'fallback_location';
       }
       
-      if (referenceLocation && referenceLocation.latitude && referenceLocation.longitude) {
-        // Position current ambulance near reference location
-        await fetch('/api/ambulances/position-all', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({
-            latitude: referenceLocation.latitude,
-            longitude: referenceLocation.longitude,
-            source: source
-          })
-        });
+      // Always position ambulances - even with fallback location
+      await fetch('/api/ambulances/position-all', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          latitude: referenceLocation.latitude,
+          longitude: referenceLocation.longitude,
+          source: source
+        })
+      });
+      
+      // Always fetch and display ambulance locations
+      const response = await fetch('/api/ambulances/locations', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const locations = await response.json();
+        console.log('📍 All ambulance locations:', locations.map((amb: { id: any; operatorId: any; vehicleNumber: any; }) => ({ id: amb.id, operatorId: amb.operatorId, vehicleNumber: amb.vehicleNumber })));
+        console.log('🔍 Looking for ambulance with ID:', currentAmbulanceId);
         
-        // Fetch current ambulance location
-        const response = await fetch('/api/ambulances/locations', {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json'
+        // Try to find ambulance by ambulance ID first, then by operator ID
+        let currentAmb = locations.find((amb: any) => amb.id === currentAmbulanceId);
+        if (!currentAmb) {
+          // Fallback: try to find by operator ID in case currentAmbulanceId is a user ID
+          currentAmb = locations.find((amb: any) => amb.operatorId === currentAmbulanceId);
+          if (currentAmb) {
+            console.log('🔄 Found ambulance by operator ID instead of ambulance ID');
           }
-        });
+        }
         
-        if (response.ok) {
-          const locations = await response.json();
-          const currentAmb = locations.find((amb: any) => amb.id === currentAmbulanceId);
-          setCurrentAmbulanceLocation(currentAmb);
+        if (currentAmb) {
+          // Ensure coordinates are parsed as numbers
+          const ambulanceWithParsedCoords = {
+            ...currentAmb,
+            latitude: parseFloat(currentAmb.currentLatitude),
+            longitude: parseFloat(currentAmb.currentLongitude)
+          };
+          console.log('🚑 Found current ambulance:', ambulanceWithParsedCoords);
+          setCurrentAmbulanceLocation(ambulanceWithParsedCoords);
+        } else {
+            console.log('⚠️ No ambulance found for ID:', currentAmbulanceId);
+            console.log('Available ambulance IDs:', locations.map((amb: any) => amb.id));
+            console.log('Available operator IDs:', locations.map((amb: { operatorId: number }) => amb.operatorId));
         }
       }
     } catch (error) {
@@ -355,16 +383,22 @@ export function LocationMap({
     }
   }, [patientLocation, currentAmbulanceLocation, showCurrentAmbulance]);
 
-  // Get user's current location with optimized caching
+  // Get user's current location with optimized caching and fallback
   const getCurrentLocation = () => {
     setLocation(prev => ({ ...prev, isLoading: true, error: null }));
 
     if (!navigator.geolocation) {
-      setLocation(prev => ({
-        ...prev,
-        error: 'Geolocation is not supported by this browser',
+      // Use fallback location instead of showing error
+      const fallbackLocation = { latitude: 22.7196, longitude: 75.8577 };
+      setLocation({
+        ...fallbackLocation,
+        error: null,
         isLoading: false
-      }));
+      });
+      
+      if (onLocationChange) {
+        onLocationChange(fallbackLocation);
+      }
       return;
     }
 
@@ -411,42 +445,44 @@ export function LocationMap({
         }
       },
       (error) => {
-        let errorMessage = 'Unable to retrieve location';
+        console.warn('Geolocation failed, using fallback location:', error.message);
+        // Use fallback location instead of showing error
+        const fallbackLocation = { latitude: 22.7196, longitude: 75.8577 };
         
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
-            errorMessage = 'Location access denied. Please enable location permissions in your browser settings.';
-            break;
-          case error.POSITION_UNAVAILABLE:
-            errorMessage = 'Location information is unavailable. Please check your internet connection.';
-            break;
-          case error.TIMEOUT:
-            errorMessage = 'Location request timed out. Please try again.';
-            break;
-        }
+        // Cache the fallback so we don't keep retrying
+        localStorage.setItem('userLocation', JSON.stringify(fallbackLocation));
+        localStorage.setItem('userLocationTimestamp', now.toString());
         
-        setLocation(prev => ({
-          ...prev,
-          error: errorMessage,
+        setLocation({
+          ...fallbackLocation,
+          error: null, // Don't show error, just use fallback
           isLoading: false
-        }));
+        });
+        
+        if (onLocationChange) {
+          onLocationChange(fallbackLocation);
+        }
       },
       {
         enableHighAccuracy: false, // Fast, low-accuracy for immediate response
-        timeout: 8000,
+        timeout: 5000, // Shorter timeout
         maximumAge: 300000 // 5 minutes browser cache
       }
     );
   };
 
-  // Initialize map when both Google Maps is loaded and location is available
+  // Initialize map when Google Maps is loaded (with fallback location if needed)
   useEffect(() => {
-    if (!isMapLoaded || !mapRef.current || !location.latitude || !location.longitude) {
+    if (!isMapLoaded || !mapRef.current) {
       return;
     }
 
+    // Use location if available, otherwise use Indore city center as fallback
+    const centerLat = location.latitude || 22.7196;
+    const centerLng = location.longitude || 75.8577;
+
     const mapOptions: google.maps.MapOptions = {
-      center: { lat: location.latitude, lng: location.longitude },
+      center: { lat: centerLat, lng: centerLng },
       zoom: 15,
       mapTypeControl: true,
       streetViewControl: true,
@@ -458,9 +494,12 @@ export function LocationMap({
     const map = new google.maps.Map(mapRef.current, mapOptions);
     mapInstanceRef.current = map;
 
-    // Create marker for current location
+    // Create marker for current location (use fallback if location not available)
+    const markerLat = location.latitude || centerLat;
+    const markerLng = location.longitude || centerLng;
+    
     const marker = new google.maps.Marker({
-      position: { lat: location.latitude, lng: location.longitude },
+      position: { lat: markerLat, lng: markerLng },
       map: map,
       title: "Patient's Location",
       icon: {
@@ -499,8 +538,8 @@ export function LocationMap({
           <h3 style="margin: 0 0 4px 0; font-size: 14px; font-weight: bold;">📍 Patient's Location</h3>
           <p style="margin: 0; font-size: 12px; color: #666;">
             Current coordinates<br>
-            Lat: ${location.latitude.toFixed(6)}<br>
-            Lng: ${location.longitude.toFixed(6)}
+            Lat: ${markerLat.toFixed(6)}<br>
+            Lng: ${markerLng.toFixed(6)}
           </p>
         </div>
       `;

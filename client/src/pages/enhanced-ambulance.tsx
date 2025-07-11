@@ -43,7 +43,7 @@ export default function EnhancedAmbulanceDashboard() {
     enabled: !!user?.id,
   });
 
-  // Get emergency requests assigned to this ambulance
+  // Get emergency requests with persistent tracking for this ambulance
   const emergencyRequestsQuery = useQuery({
     queryKey: ['/api/emergency/requests'],
     enabled: !!user?.id,
@@ -61,15 +61,25 @@ export default function EnhancedAmbulanceDashboard() {
   const emergencyRequests = emergencyRequestsQuery.data || [];
   const pendingRequests = emergencyRequests.filter((req: any) => req.status === 'pending');
   
-  // Find active request from database, but prioritize selectedRequest if it exists
+  // Find active request from database, filtering by current ambulance
+  const currentAmbulanceId = ambulanceProfile?.id;
   const dbActiveRequest = emergencyRequests.find((req: any) => 
-    ['accepted', 'dispatched', 'en_route', 'at_scene'].includes(req.status)
+    req.ambulanceId === currentAmbulanceId && ['accepted', 'dispatched', 'en_route', 'at_scene', 'transporting'].includes(req.status)
   );
   
   // Use selectedRequest if it exists and is still active, otherwise use database request
-  const activeRequest = selectedRequest && ['accepted', 'dispatched', 'en_route', 'at_scene'].includes(selectedRequest.status) 
+  const activeRequest = selectedRequest && ['accepted', 'dispatched', 'en_route', 'at_scene', 'transporting'].includes(selectedRequest.status) 
     ? selectedRequest 
     : dbActiveRequest;
+
+  // Auto-restore active request on page load/refresh if there's a persistent request
+  useEffect(() => {
+    if (dbActiveRequest && !selectedRequest && !journeyActive) {
+      console.log('🔄 Auto-restoring active request on page load:', dbActiveRequest.id);
+      setSelectedRequest(dbActiveRequest);
+      setJourneyActive(true);
+    }
+  }, [dbActiveRequest, selectedRequest, journeyActive]);
 
   // Debug logging to understand state changes
   useEffect(() => {

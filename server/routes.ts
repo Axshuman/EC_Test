@@ -753,7 +753,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           requests = enhancedRequests;
           break;
         case 'ambulance':
-          requests = await storage.getActiveEmergencyRequests();
+          // Get ambulance ID from user profile
+          const ambulanceProfile = await storage.getAmbulanceByOperatorId(req.user.id);
+          if (!ambulanceProfile) {
+            return res.status(404).json({ message: 'Ambulance profile not found' });
+          }
+          
+          // Get active request assigned to this ambulance (persistent tracking)
+          const activeRequest = await storage.getActiveRequestForAmbulance(ambulanceProfile.id);
+          
+          if (activeRequest) {
+            // Return the active request along with pending requests
+            const allActiveRequests = await storage.getActiveEmergencyRequests();
+            const pendingRequests = allActiveRequests.filter(req => req.status === 'pending');
+            
+            // Combine active request with pending requests, ensuring no duplicates
+            const combinedRequests = [activeRequest, ...pendingRequests.filter(req => req.id !== activeRequest.id)];
+            requests = combinedRequests;
+          } else {
+            // No active request, just return pending requests
+            requests = await storage.getActiveEmergencyRequests();
+          }
           break;
         case 'hospital':
           requests = await storage.getActiveEmergencyRequests();
@@ -898,6 +918,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(updatedRequest);
     } catch (error) {
       console.error('Emergency request update error:', error);
+      res.status(500).json({ message: 'Failed to update emergency request' });
+    }
+  });
+
+  // PATCH endpoint for emergency requests (for enhanced patient dashboard)
+  app.patch('/api/emergency/request/:id', authenticateToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body;
+      
+      console.log('PATCH emergency request:', { id, updates });
+      
+      const updatedRequest = await storage.updateEmergencyRequest(parseInt(id), updates);
+      
+      console.log('PATCH request result:', updatedRequest);
+      
+      // If request is being cancelled, also update ambulance status to available
+      if (updates.status === 'cancelled' && updatedRequest.ambulanceId) {
+        try {
+          await storage.updateAmbulance(updatedRequest.ambulanceId, { status: 'available' });
+          console.log('Updated ambulance status to available after cancellation');
+        } catch (error) {
+          console.error('Error updating ambulance status after cancellation:', error);
+        }
+      }
+      
+      // Broadcast update to all connected clients
+      broadcastToAll({
+        type: 'emergency_request_updated',
+        data: updatedRequest
+      });
+      
+      res.json(updatedRequest);
+    } catch (error) {
+      console.error('PATCH emergency request error:', error);
       res.status(500).json({ message: 'Failed to update emergency request' });
     }
   });
