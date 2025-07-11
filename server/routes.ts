@@ -922,6 +922,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // PATCH endpoint for emergency requests (for enhanced patient dashboard)
+  app.patch('/api/emergency/request/:id', authenticateToken, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body;
+      
+      console.log('PATCH emergency request:', { id, updates });
+      
+      const updatedRequest = await storage.updateEmergencyRequest(parseInt(id), updates);
+      
+      console.log('PATCH request result:', updatedRequest);
+      
+      // If request is being cancelled, also update ambulance status to available
+      if (updates.status === 'cancelled' && updatedRequest.ambulanceId) {
+        try {
+          await storage.updateAmbulance(updatedRequest.ambulanceId, { status: 'available' });
+          console.log('Updated ambulance status to available after cancellation');
+        } catch (error) {
+          console.error('Error updating ambulance status after cancellation:', error);
+        }
+      }
+      
+      // Broadcast update to all connected clients
+      broadcastToAll({
+        type: 'emergency_request_updated',
+        data: updatedRequest
+      });
+      
+      res.json(updatedRequest);
+    } catch (error) {
+      console.error('PATCH emergency request error:', error);
+      res.status(500).json({ message: 'Failed to update emergency request' });
+    }
+  });
+
   // Get available wards endpoint
   app.get('/api/hospitals/:hospitalId/available-wards', authenticateToken, async (req, res) => {
     try {
